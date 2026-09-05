@@ -22,7 +22,7 @@ PROFILES: dict = {
 }
 
 # Robot starts slow; a 50 km/h sign switches to fast; Road work switches back to slow.
-DEFAULT_PROFILE = PROFILE_FAST
+DEFAULT_PROFILE = PROFILE_SLOW
 
 # Stop behaviour
 STOP_HOLD_S     = 5.0   # seconds to coast when a Stop sign is seen

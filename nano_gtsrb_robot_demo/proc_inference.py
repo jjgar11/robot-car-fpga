@@ -78,7 +78,6 @@ def inference_process(
             # Check shutdown before starting a (potentially blocking) DMA transfer
             if shutdown_event.is_set():
                 break
-
             # Run inference
             result = pipe.process_frame(frame)
 
@@ -89,7 +88,7 @@ def inference_process(
                 class_id  = stable.get('class_id') or 0,
                 label     = stable.get('label', ''),
                 score_sum = stable.get('score_sum') or 0.0,
-                timestamp = time.monotonic(),
+                timestamp   = result["fpga_ms"],
                 frame_id  = frame_id,
                 ready     = stable.get('ready', False),
             )

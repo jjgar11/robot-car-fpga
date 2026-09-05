@@ -244,7 +244,7 @@ class InferencePipe:
                 "ODMA not idle"
             )
 
-        t0 = time.perf_counter()
+        fpga_start_ns = time.perf_counter_ns()
 
         self.accel.execute_on_buffers(
             asynch=True,
@@ -258,7 +258,7 @@ class InferencePipe:
                 break
 
             if (
-                time.perf_counter() - t0
+                time.perf_counter() - fpga_start_ns
                 > self.config.fpga_timeout_s
             ):
                 raise RuntimeError(
@@ -267,7 +267,8 @@ class InferencePipe:
 
             time.sleep(0.0001)
 
-        t1 = time.perf_counter()
+        fpga_end_ns = time.perf_counter_ns()
+        fpga_ms = ( fpga_end_ns - fpga_start_ns) / 1_000_000.0
 
         self.accel.copy_output_data_from_device(
             self.accel.obuf_packed[0],
@@ -294,16 +295,10 @@ class InferencePipe:
 
         return {
             "raw_class_id": class_id,
-            "raw_label": (
-                LABELS_EN[class_id]
-            ),
-            "raw_score": float(
-                scores[class_id]
-            ),
+            "raw_label": LABELS_EN[class_id],
+            "raw_score": float(scores[class_id]),
             "scores": scores.copy(),
-            "fpga_ms": (
-                t1 - t0
-            ) * 1000.0,
+            "fpga_ms": fpga_ms,
         }
 
     def process_frame(

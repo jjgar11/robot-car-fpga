@@ -11,10 +11,10 @@ class DemoConfig:
     camera_fourcc: str = "MJPG"
 
     # Model / preprocessing
-    crop_fraction: float = 0.40
-    tilt_fraction: float = 0.30
+    crop_fraction: float = 0.35
+    tilt_fraction: float = 0.0
     input_size: int = 64
-    score_window: int = 10
+    score_window: int = 5
 
     # Application
     target_fps: float = 20.0
