@@ -70,12 +70,13 @@ def comm_process(
 
                 # 4. JSON Lines record
                 log.write(json.dumps({
-                    'ts':       event.timestamp,
+                    'fpga_ms':  event.fpga_ms,
                     'frame_id': event.frame_id,
                     'class_id': event.class_id,
                     'label':    event.label,
                     'score':    event.score_sum,
                     'ready':    event.ready,
+                    'ts':       event.timestamp,
                 }) + '\n')
                 log.flush()
 

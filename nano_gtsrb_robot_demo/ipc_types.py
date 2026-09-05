@@ -12,3 +12,4 @@ class DetectionEvent:
     timestamp: float = field(default_factory=time.monotonic)
     frame_id: int = 0
     ready: bool = False  # True when temporal filter has a stable result
+    fpga_ms: float = 0.0  # FPGA inference duration, for logging/telemetry only

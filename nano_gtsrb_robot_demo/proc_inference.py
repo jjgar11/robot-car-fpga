@@ -88,9 +88,10 @@ def inference_process(
                 class_id  = stable.get('class_id') or 0,
                 label     = stable.get('label', ''),
                 score_sum = stable.get('score_sum') or 0.0,
-                timestamp   = result["fpga_ms"],
+                timestamp = time.monotonic(),
                 frame_id  = frame_id,
                 ready     = stable.get('ready', False),
+                fpga_ms   = result["fpga_ms"],
             )
 
             # Fan out to both consumers (drop silently if queue is full)
