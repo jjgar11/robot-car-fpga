@@ -102,7 +102,7 @@ from proc_movement import MovementController
 def _make_ctrl(ir: int = 0x00, fault: int = 0x00):
     mmio = FakeMMIO(ir=ir, fault=fault)
     rc   = FakeRC(mmio)
-    ctrl = MovementController(rc, mmio, dry_run=True)
+    ctrl = MovementController(rc, mmio)
     return ctrl, mmio
 
 

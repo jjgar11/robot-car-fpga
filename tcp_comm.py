@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import socket
 import struct
-from typing import Generator, Optional, Tuple
+from collections.abc import Generator
 
 DEFAULT_PORT = 50007
 _FORMAT = "!II"          # big-endian, two uint32
@@ -48,7 +48,7 @@ def encode_detection(class_id: int, confidence: int) -> bytes:
     return struct.pack(_FORMAT, max(0, class_id), max(0, confidence))
 
 
-def decode_detection(data: bytes) -> Tuple[int, int]:
+def decode_detection(data: bytes) -> tuple[int, int]:
     """Unpack 8-byte payload -> (class_id, confidence).
 
     Raises ValueError if len(data) != PAYLOAD_SIZE.
@@ -58,7 +58,7 @@ def decode_detection(data: bytes) -> Tuple[int, int]:
     return struct.unpack(_FORMAT, data)
 
 
-def recv_exact(sock: socket.socket, n: int, timeout_s: float = 5.0) -> Optional[bytes]:
+def recv_exact(sock: socket.socket, n: int, timeout_s: float = 5.0) -> None | bytes:
     """Receive exactly n bytes from sock, handling fragmentation.
 
     Returns None if the connection is closed before n bytes arrive or
@@ -73,7 +73,7 @@ def recv_exact(sock: socket.socket, n: int, timeout_s: float = 5.0) -> Optional[
             if not chunk:
                 return None
             buf.extend(chunk)
-    except (socket.timeout, OSError):
+    except (TimeoutError, OSError):
         return None
     finally:
         sock.settimeout(orig_timeout)
@@ -102,8 +102,8 @@ class RobotServer:
 
     def __init__(self, port: int = DEFAULT_PORT):
         self._port = port
-        self._server: Optional[socket.socket] = None
-        self._client: Optional[socket.socket] = None
+        self._server: socket.socket | None = None
+        self._client: socket.socket | None = None
 
     # ------------------------------------------------------------------
     def start(self) -> None:
@@ -192,7 +192,7 @@ def laptop_recv(
     robot_ip: str,
     port: int = DEFAULT_PORT,
     n_events: int = 0,
-) -> Generator[Tuple[int, int], None, None]:
+) -> Generator[tuple[int, int], None, None]:
     """Connect to the robot and yield (class_id, confidence) tuples.
 
     Parameters

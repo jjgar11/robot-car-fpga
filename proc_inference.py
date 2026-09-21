@@ -8,58 +8,21 @@ import signal
 import sys
 import time
 from queue import Empty, Full
+from motion_config import MAX_EVENT_AGE_S
 
-MAX_EVENT_AGE_S = 2.0   # discard frames older than this before inference
-
-DEMO_DIR = '/home/xilinx/nano_gtsrb_robot_demo'
-
-
-def inference_process(
-    cam_to_inf_q,
-    inf_to_mov_q,
-    inf_to_com_q,
-    shutdown_event,
-    ready_event,
-    config,
-):
-    """Child-process entry point for FINN inference."""
+def inference_process(cam_to_inf_q, inf_to_mov_q, inf_to_com_q, shutdown_event, ready_event, config):
+    """Child-process entry point for inference."""
     # Ignore SIGINT — supervisor handles shutdown
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-
-    # Insert paths so local modules resolve after fork
-    sys.path.insert(0, DEMO_DIR)
 
     try:
         from inference_pipe import InferencePipe
         from temporal_filter import TemporalScoreFilter
         from ipc_types import DetectionEvent
 
-        # Build an InferencePipe-compatible config.
-        # InferencePipe expects the existing DemoConfig dataclass from config.py.
-        # If the passed-in config is already compatible (has base_dir), use it
-        # directly; otherwise build a DemoConfig using its defaults and then
-        # overwrite the fields that matter for inference/camera from our config.
-        if not hasattr(config, 'base_dir'):
-            from config import DemoConfig
-            import dataclasses
-            # Collect only the fields DemoConfig actually declares
-            dc_fields = {f.name for f in dataclasses.fields(DemoConfig)}
-            # Map SupervisorConfig field names → DemoConfig field names
-            field_map = {
-                'score_window': 'score_window',
-                'target_fps':   'target_fps',
-            }
-            overrides = {}
-            for src, dst in field_map.items():
-                if dst in dc_fields and hasattr(config, src):
-                    overrides[dst] = getattr(config, src)
-            inf_config = DemoConfig(**overrides)
-        else:
-            inf_config = config
-
         # Load overlay and build inference pipeline
-        pipe     = InferencePipe(inf_config, clear_pynq_state=True)
-        temporal = TemporalScoreFilter(inf_config.score_window)
+        pipe     = InferencePipe(config, clear_pynq_state=True)
+        temporal = TemporalScoreFilter(config.score_window)
 
         ready_event.set()
 
@@ -67,7 +30,7 @@ def inference_process(
             # Fetch frame (block briefly so we don't spin)
             try:
                 frame_id, ts, frame = cam_to_inf_q.get(timeout=0.5)
-            except (Empty, Exception):
+            except Empty:
                 continue
 
             # Discard frames that are too old to be useful
@@ -99,7 +62,15 @@ def inference_process(
                 try:
                     q.put_nowait(event)
                 except Full:
-                    pass
+                    try:
+                        q.get_nowait()
+                    except Empty:
+                        pass
+
+                    try:
+                        q.put_nowait(event)
+                    except Full:
+                        pass
 
     except Exception as exc:
         print(f"[inference] Exception: {exc}", flush=True)

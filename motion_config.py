@@ -42,6 +42,3 @@ MAX_EVENT_AGE_S = 2.0
 RC_BASE = 0xA0010000
 RC_SIZE = 0x1000
 
-# Overlay paths
-OVERLAY_BIT = '/home/xilinx/overlays/nano_gtsrb_robot/nano_gtsrb_robot.bit'
-OVERLAY_HWH = '/home/xilinx/overlays/nano_gtsrb_robot/nano_gtsrb_robot.hwh'

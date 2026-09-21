@@ -6,35 +6,61 @@ and pushes them to a maxsize=1 queue, always keeping only the freshest frame.
 
 import signal
 import time
+import cv2
+import numpy as np
+from queue import Empty, Full
 
+def preprocess(frame_bgr, config):
+    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+
+    h, w = frame_rgb.shape[:2]
+
+    side = int(min(h, w) * config.crop_fraction)
+
+    side = max(side, config.input_size)
+
+    x0 = (w - side) // 2
+
+    crop_shift_percent = config.tilt_fraction
+    max_shift = (h - side) // 2
+
+    y0 = (h - side) // 2 + int(max_shift * crop_shift_percent)
+    y0 = max(0, min(y0, h - side))
+
+    crop = frame_rgb[
+        y0:y0 + side,
+        x0:x0 + side,
+    ]
+
+    frame64 = cv2.resize(crop,
+        (config.input_size, config.input_size),
+        interpolation=cv2.INTER_AREA,
+    )
+
+    x_float = (frame64.astype(np.float32) / 255.0)
+
+    x_int4 = np.clip(np.floor(x_float * 8.0 + 0.5), -8, 7).astype(np.float32)
+
+    return x_int4, frame64
 
 def camera_process(cam_to_inf_q, shutdown_event, ready_event, config):
     """Child-process entry point for camera capture."""
     # Ignore SIGINT — supervisor handles shutdown
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
-    import cv2  # import after fork
-
     cap = None
     try:
-        # Support both DemoConfig field names (camera_*) and SupervisorConfig names (frame_*)
-        camera_device = getattr(config, 'camera_device', '/dev/video0')
-        frame_width   = getattr(config, 'camera_width',  getattr(config, 'frame_width',  320))
-        frame_height  = getattr(config, 'camera_height', getattr(config, 'frame_height', 240))
-        target_fps    = getattr(config, 'camera_fps',    getattr(config, 'target_fps',   20.0))
-        fourcc_str    = getattr(config, 'camera_fourcc', 'MJPG')
-
-        if isinstance(camera_device, str):
-            cap = cv2.VideoCapture(camera_device, cv2.CAP_V4L2)
+        if isinstance(config.camera_device, str):
+            cap = cv2.VideoCapture(config.camera_device, cv2.CAP_V4L2)
         else:
-            cap = cv2.VideoCapture(int(camera_device), cv2.CAP_V4L2)
+            cap = cv2.VideoCapture(int(config.camera_device), cv2.CAP_V4L2)
 
         # Configure capture parameters
-        fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
+        fourcc = cv2.VideoWriter_fourcc(*config.camera_fourcc)
         cap.set(cv2.CAP_PROP_FOURCC,       fourcc)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  frame_width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, frame_height)
-        cap.set(cv2.CAP_PROP_FPS,          target_fps)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  config.camera_width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.camera_height)
+        cap.set(cv2.CAP_PROP_FPS,          config.camera_fps)
 
         if not cap.isOpened():
             print("[camera] Failed to open camera device", flush=True)
@@ -48,24 +74,27 @@ def camera_process(cam_to_inf_q, shutdown_event, ready_event, config):
 
         frame_id = 0
         while not shutdown_event.is_set():
-            ret, frame = cap.read()
+            ret, frame_bgr = cap.read()
             if not ret:
                 time.sleep(0.005)
                 continue
 
+            (frame, _) = preprocess(frame_bgr, config)
             item = (frame_id, time.monotonic(), frame)
             frame_id += 1
 
             # Drop stale frame from queue, then push new one (non-blocking)
-            while not cam_to_inf_q.empty():
-                try:
-                    cam_to_inf_q.get_nowait()
-                except Exception:
-                    break
             try:
                 cam_to_inf_q.put_nowait(item)
-            except Exception:
-                pass
+            except Full:
+                try:
+                    cam_to_inf_q.get_nowait()
+                except Empty:
+                    pass
+                try:
+                    cam_to_inf_q.put_nowait(item)
+                except Full:
+                    pass
 
     except Exception as exc:
         print(f"[camera] Exception: {exc}", flush=True)

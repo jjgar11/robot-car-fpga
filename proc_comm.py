@@ -12,35 +12,20 @@ from __future__ import annotations
 
 import json
 import signal
-import sys
-import time
-
-DEFAULT_LOG_PATH = '/tmp/robot_detections.jsonl'
-DEFAULT_TCP_PORT = 50007
 
 
-def comm_process(
-    inf_to_com_q,
-    shutdown_event,
-    ready_event,
-    log_path: str = None,
-    tcp_port: int = DEFAULT_TCP_PORT,
-):
+def comm_process(inf_to_com_q, shutdown_event, ready_event, config):
     """Child-process entry point for the comms/logging process."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
-    if log_path is None:
-        log_path = DEFAULT_LOG_PATH
-
-    sys.path.insert(0, '/home/xilinx/nano_gtsrb_robot_demo')
     from tcp_comm import RobotServer
 
-    server = RobotServer(port=tcp_port)
+    server = RobotServer(port=config.tcp_port)
 
     try:
         server.start()
 
-        with open(log_path, 'a', buffering=1) as log:
+        with open(config.log_path, 'a', buffering=1) as log:
             ready_event.set()
 
             while not shutdown_event.is_set():

@@ -24,31 +24,6 @@ REG_WDG_KICK  = 0x10   # write anything to kick watchdog
 
 
 # ---------------------------------------------------------------------------
-# Dry-run MMIO stub (no real hardware access)
-# ---------------------------------------------------------------------------
-class DryRunMMIO:
-    """Simulates MMIO registers; prints writes to stdout."""
-
-    def __init__(self):
-        self.regs = {
-            REG_CONTROL:   0x00,
-            REG_IR:        0x00,
-            REG_WDG_KICK:  0x00,
-            REG_LEFT_CMD:  0x00,
-            REG_RIGHT_CMD: 0x00,
-            REG_FAULT:     0x00,
-            REG_VERSION:   0x00010000,
-        }
-
-    def read(self, offset: int) -> int:
-        return self.regs.get(offset, 0)
-
-    def write(self, offset: int, value: int) -> None:
-        self.regs[offset] = value
-        print(f"[DRY-RUN] MMIO write 0x{offset:03X} = 0x{value:08X}", flush=True)
-
-
-# ---------------------------------------------------------------------------
 # MovementController
 # ---------------------------------------------------------------------------
 from motion_config import (
@@ -63,10 +38,9 @@ from sign_config import classify_sign
 class MovementController:
     """Encapsulates control logic; injectable rc and mmio enable unit testing."""
 
-    def __init__(self, rc, mmio, dry_run: bool = False):
+    def __init__(self, rc, mmio):
         self._rc       = rc
         self._mmio     = mmio
-        self._dry_run  = dry_run
 
         # State machine
         self._state             = 'LINE_FOLLOW'
@@ -226,62 +200,29 @@ class MovementController:
 # ---------------------------------------------------------------------------
 # movement_process — entry point for the child process
 # ---------------------------------------------------------------------------
-def movement_process(
-    inf_to_mov_q,
-    shutdown_event,
-    ready_event,
-    startup_q,
-    enable_event,
-    dry_run: bool = False,
-):
+def movement_process(inf_to_mov_q, shutdown_event, ready_event, startup_q, enable_event, config):
     """Child-process entry point.  Called after fork() by robot_main."""
     # 1. Ignore SIGINT in child (supervisor handles it)
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
     # 2. Insert module search paths
-    sys.path.insert(0, '/home/xilinx/overlays/nano_gtsrb_robot/robot_control')
-    sys.path.insert(0, '/home/xilinx/nano_gtsrb_robot_demo')
-
+    sys.path.insert(0, str(config.robot_control_dir))
+    
     rc   = None
     ctrl = None
 
     try:
-        # 3. Import hardware libraries (after fork so parent never loads them)
-        if dry_run:
-            mmio = DryRunMMIO()
-            # Minimal stub so we don't need pynq at all in dry-run
-            class _DryRunRC:
-                def __init__(self, mmio):
-                    self._mmio = mmio
-                def enable(self, on):
-                    self._mmio.write(REG_CONTROL, 0x01 if on else 0x00)
-                def is_enabled(self):
-                    return bool(self._mmio.read(REG_CONTROL) & 0x01)
-                def kick_watchdog(self):
-                    self._mmio.write(REG_WDG_KICK, 1)
-                def clear_fault_bits(self, **_kw):
-                    self._mmio.write(REG_FAULT, 0)
-                def read_fault(self):
-                    raw = self._mmio.read(REG_FAULT)
-                    class _F:
-                        def __init__(self, r):
-                            self.watchdog_expired = bool(r & 0x01)
-                            self.estop_active     = bool(r & 0x02)
-                    return _F(raw)
-                def read_version(self):
-                    return self._mmio.read(REG_VERSION)
-            rc = _DryRunRC(mmio)
-        else:
-            from pynq import MMIO
-            from robot_control import RobotControl
-            from motion_config import OVERLAY_BIT, RC_BASE, RC_SIZE
-            mmio = MMIO(RC_BASE, RC_SIZE)
-            rc   = RobotControl(mmio)
+        from pynq import MMIO
+        from robot_control import RobotControl
+        from motion_config import RC_BASE, RC_SIZE
+        mmio = MMIO(RC_BASE, RC_SIZE)
+        rc   = RobotControl(mmio)
 
         # 6. Verify hardware version
         version = mmio.read(REG_VERSION)
         if version != 0x00010000:
             startup_q.put({'ok': False, 'error': f'Bad VERSION: 0x{version:08X}'})
+            ready_event.set()
             return
 
         # 7. Assert ENABLE=0 at startup
@@ -299,7 +240,7 @@ def movement_process(
             return
 
         # 11. Build controller
-        ctrl = MovementController(rc, mmio, dry_run)
+        ctrl = MovementController(rc, mmio)
 
         # 12. Prime watchdog and enable
         rc.kick_watchdog()
