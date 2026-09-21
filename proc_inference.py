@@ -5,10 +5,13 @@ filter, and fans the resulting DetectionEvent out to both downstream queues.
 """
 
 import signal
-import sys
 import time
 from queue import Empty, Full
 from motion_config import MAX_EVENT_AGE_S
+from inference_pipe import InferencePipe
+from collections import deque
+import numpy as np
+from labels import LABELS_EN
 
 def inference_process(cam_to_inf_q, inf_to_mov_q, inf_to_com_q, shutdown_event, ready_event, config):
     """Child-process entry point for inference."""
@@ -16,10 +19,6 @@ def inference_process(cam_to_inf_q, inf_to_mov_q, inf_to_com_q, shutdown_event, 
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
     try:
-        from inference_pipe import InferencePipe
-        from temporal_filter import TemporalScoreFilter
-        from ipc_types import DetectionEvent
-
         # Load overlay and build inference pipeline
         pipe     = InferencePipe(config, clear_pynq_state=True)
         temporal = TemporalScoreFilter(config.score_window)
@@ -47,7 +46,7 @@ def inference_process(cam_to_inf_q, inf_to_mov_q, inf_to_com_q, shutdown_event, 
             # Apply temporal filter
             stable = temporal.update(result['scores'])
 
-            event = DetectionEvent(
+            event = config.DetectionEvent(
                 class_id  = stable.get('class_id') or 0,
                 label     = stable.get('label', ''),
                 score_sum = stable.get('score_sum') or 0.0,
@@ -81,3 +80,48 @@ def inference_process(cam_to_inf_q, inf_to_mov_q, inf_to_com_q, shutdown_event, 
         inf_to_mov_q.cancel_join_thread()
         inf_to_com_q.cancel_join_thread()
         print("[inference] process exiting", flush=True)
+
+
+class TemporalScoreFilter:
+    """
+    Sliding temporal window.
+
+    Decision = argmax(sum(scores of last N processed frames))
+    """
+
+    def __init__(self, window_size=10):
+        self.window_size = window_size
+        self.history = deque(maxlen=window_size)
+
+    def reset(self):
+        self.history.clear()
+
+    @property
+    def ready(self):
+        return (len(self.history) == self.window_size)
+
+    def update(self, scores):
+        self.history.append(np.asarray(scores).copy())
+
+        if not self.ready:
+            return {
+                "ready": False,
+                "window_fill": len(self.history),
+                "window_size": (self.window_size),
+                "class_id": None,
+                "label": "Warming up",
+                "score_sum": None,
+            }
+
+        accumulated_scores = np.sum(np.stack(self.history), axis=0)
+
+        class_id = int(np.argmax(accumulated_scores))
+
+        return {
+            "ready": True,
+            "window_fill": len(self.history),
+            "window_size": (self.window_size),
+            "class_id": class_id,
+            "label": (LABELS_EN[class_id]),
+            "score_sum": float(accumulated_scores[class_id]),
+        }

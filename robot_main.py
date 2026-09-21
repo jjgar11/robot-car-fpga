@@ -32,7 +32,6 @@ def validate_files(config):
         config.bitfile,
         config.hwhfile,
         config.driver_dir,
-        config.robot_control_py,
     )
     for path in required:
         if not os.path.exists(path):
@@ -184,7 +183,7 @@ def main():
 
             print(
                 f"[supervisor] Movement ready — "
-                f"VERSION=0x{info.get('version', 0):08X} "
+                f"VERSION={info.get('version', 0)} "
                 f"ENABLE={info.get('enable')}", flush=True,
             )
 

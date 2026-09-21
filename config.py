@@ -46,14 +46,6 @@ class DemoConfig:
     def driver_dir(self) -> Path:
         return self.base_dir / self.driver_dir_name
 
-    @property
-    def robot_control_dir(self) -> Path:
-        return self.base_dir / self.robot_control_dir_name
-
-    @property
-    def robot_control_py(self) -> Path:
-        return self.robot_control_dir / "robot_control.py"
-
 
 """IPC message types shared between robot processes."""
 @dataclass

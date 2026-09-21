@@ -10,22 +10,6 @@ import time
 from collections import deque
 from queue import Empty
 
-
-# ---------------------------------------------------------------------------
-# Register offsets inside robot_control_0 (0xA0010000)
-# ---------------------------------------------------------------------------
-REG_CONTROL   = 0x08   # bit0 = ENABLE, bit1 = COAST_LEFT, bit2 = COAST_RIGHT
-REG_IR        = 0x0C   # bit0 = left IR (1=black), bit1 = right IR (1=black)
-REG_LEFT_CMD  = 0x00   # bit7=DIR (1=forward), bits[6:0]=duty %
-REG_RIGHT_CMD = 0x04   # same layout
-REG_FAULT     = 0x1C   # bit0 = watchdog_expired, bit1 = estop
-REG_VERSION   = 0x20   # expected 0x00010000
-REG_WDG_KICK  = 0x10   # write anything to kick watchdog
-
-
-# ---------------------------------------------------------------------------
-# MovementController
-# ---------------------------------------------------------------------------
 from motion_config import (
     DEFAULT_PROFILE, PROFILES,
     STOP_HOLD_S, STOP_COOLDOWN_S,
@@ -38,9 +22,8 @@ from sign_config import classify_sign
 class MovementController:
     """Encapsulates control logic; injectable rc and mmio enable unit testing."""
 
-    def __init__(self, rc, mmio):
+    def __init__(self, rc):
         self._rc       = rc
-        self._mmio     = mmio
 
         # State machine
         self._state             = 'LINE_FOLLOW'
@@ -66,10 +49,10 @@ class MovementController:
 
         # 1. Kick watchdog periodically
         if self._iter_count % WDG_KICK_EVERY == 0:
-            self._mmio.write(REG_WDG_KICK, 1)
+            self._rc.kick_watchdog()
 
         # 2. Read IR with majority vote
-        raw_ir = self._mmio.read(REG_IR) & 0x03
+        raw_ir = self._rc.read_ir()
         self._ir_history.append(raw_ir)
         ir = self._majority_ir()
 
@@ -84,7 +67,7 @@ class MovementController:
         left_s = right_s = 0
 
         if self._state == 'STOP_HOLD':
-            self._coast_both()
+            self._rc.coast_both()
             action = 'COAST'
             if mono_now >= self._stop_deadline:
                 # Resume line-following; start cooldown
@@ -149,48 +132,28 @@ class MovementController:
         Returns (left_speed, right_speed, action_label).
         """
         p = self._profile
-        if ir == 0x00:   # both white → go straight
-            self._set_left(p.base_duty)
-            self._set_right(p.base_duty)
+        if ir == 0b00:   # both white → go straight
+            self._rc.set_left(p.base_duty)
+            self._rc.set_right(p.base_duty)
             return p.base_duty, p.base_duty, 'STRAIGHT'
-        elif ir == 0x01: # left black → turn left
-            self._coast_left()
-            self._set_right(p.turn_outer)
+        elif ir == 0b01: # left black → turn left
+            self._rc.coast_left()
+            self._rc.set_right(p.turn_outer)
             return 0, p.turn_outer, 'TURN_LEFT'
-        elif ir == 0x02: # right black → turn right
-            self._set_left(p.turn_outer)
-            self._coast_right()
+        elif ir == 0b10: # right black → turn right
+            self._rc.set_left(p.turn_outer)
+            self._rc.coast_right()
             return p.turn_outer, 0, 'TURN_RIGHT'
         else:            # 0x03 both black → corner CCW
-            self._set_left(p.corner_inner)
-            self._set_right(p.turn_outer)
-            return p.corner_inner, p.turn_outer, 'CORNER'
-
-    # ------------------------------------------------------------------
-    # Low-level motor helpers
-    # ------------------------------------------------------------------
-    def _set_left(self, duty: int) -> None:
-        self._mmio.write(REG_LEFT_CMD, (duty & 0x7F) | 0x80)
-
-    def _set_right(self, duty: int) -> None:
-        self._mmio.write(REG_RIGHT_CMD, (duty & 0x7F) | 0x80)
-
-    def _coast_left(self) -> None:
-        self._mmio.write(REG_LEFT_CMD, 0x00)
-
-    def _coast_right(self) -> None:
-        self._mmio.write(REG_RIGHT_CMD, 0x00)
-
-    def _coast_both(self) -> None:
-        self._coast_left()
-        self._coast_right()
+            self._rc.brake_both()
+            return 0, 0, 'LOST'
 
     # ------------------------------------------------------------------
     def enable(self, on: bool) -> None:
         self._rc.enable(on)
 
     def safe_stop(self) -> None:
-        self._coast_both()
+        self._rc.coast_both()
         self._rc.enable(False)
 
     def check_fault(self):
@@ -205,22 +168,16 @@ def movement_process(inf_to_mov_q, shutdown_event, ready_event, startup_q, enabl
     # 1. Ignore SIGINT in child (supervisor handles it)
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
-    # 2. Insert module search paths
-    sys.path.insert(0, str(config.robot_control_dir))
-    
-    rc   = None
-    ctrl = None
-
     try:
         from pynq import MMIO
         from robot_control import RobotControl
         from motion_config import RC_BASE, RC_SIZE
-        mmio = MMIO(RC_BASE, RC_SIZE)
-        rc   = RobotControl(mmio)
+
+        rc   = RobotControl(MMIO(RC_BASE, RC_SIZE))
 
         # 6. Verify hardware version
-        version = mmio.read(REG_VERSION)
-        if version != 0x00010000:
+        version = rc.read_version()
+        if version != (1, 0, 0):
             startup_q.put({'ok': False, 'error': f'Bad VERSION: 0x{version:08X}'})
             ready_event.set()
             return
@@ -240,11 +197,19 @@ def movement_process(inf_to_mov_q, shutdown_event, ready_event, startup_q, enabl
             return
 
         # 11. Build controller
-        ctrl = MovementController(rc, mmio)
+        ctrl = MovementController(rc)
 
         # 12. Prime watchdog and enable
+        rc.enable(False)
+        rc.set_stop_policy(False)
+        rc.configure_watchdog(
+            enable=True,
+            brake_on_expiry=False,
+        )
+
         rc.kick_watchdog()
         rc.clear_fault_bits(watchdog=True)
+        rc.clear_estop()
         rc.enable(True)
 
         # 13. Main control loop at MOVEMENT_HZ
