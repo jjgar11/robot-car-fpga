@@ -3,6 +3,7 @@
 robot_main.py — 4-process robot control supervisor.
 """
 
+import argparse
 import multiprocessing
 import os
 import signal
@@ -58,10 +59,10 @@ def start_inference(cam_to_inf_q, inf_to_mov_q, inf_to_com_q, shutdown_event, re
     return p
 
 
-def start_movement(inf_to_mov_q, shutdown_event, ready_event, startup_q, enable_event, config):
+def start_movement(inf_to_mov_q, shutdown_event, ready_event, startup_q, enable_event, dry_run):
     p = multiprocessing.Process(
         target=movement_process,
-        args=(inf_to_mov_q, shutdown_event, ready_event, startup_q, enable_event, config),
+        args=(inf_to_mov_q, shutdown_event, ready_event, startup_q, enable_event, dry_run),
         name='movement',
         daemon=False,
     )
@@ -113,12 +114,17 @@ def shutdown_all(processes, shutdown_event, timeout_each=5.0):
 # Main
 # ---------------------------------------------------------------------------
 def main():
+    parser = argparse.ArgumentParser(description='Robot control supervisor')
+    parser.add_argument('--dry-run', action='store_true', help='Fake MMIO — no real motors')
+    args = parser.parse_args()
+    dry_run = args.dry_run
 
     config = DemoConfig()
     detection_event = DetectionEvent
 
     # Pre-flight: skip hardware checks in dry-run mode
-    validate_files(config)
+    if not dry_run:
+        validate_files(config)
 
     # IPC primitives
     cam_to_inf_q = multiprocessing.Queue(maxsize=1)
@@ -167,7 +173,7 @@ def main():
         # 2. Movement
         print("[supervisor] Starting movement process …", flush=True)
         proc_movement = start_movement(
-            inf_to_mov_q, shutdown_event, mov_ready_event, startup_q, enable_event, config
+            inf_to_mov_q, shutdown_event, mov_ready_event, startup_q, enable_event, dry_run,
         )
         processes.append(proc_movement)
         if not mov_ready_event.wait(timeout=TIMEOUT_MOVEMENT):
