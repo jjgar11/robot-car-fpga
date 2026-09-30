@@ -21,7 +21,12 @@ from sign_config import classify_sign
 
 
 class MovementController:
-    """Encapsulates control logic; injectable rc and mmio enable unit testing."""
+    """
+    Movement state machine and line-following controller.
+
+    Hardware access is provided through an injected RobotControl-compatible
+    backend, allowing real hardware and dry-run operation.
+    """
 
     def __init__(self, rc):
         self._rc       = rc
@@ -38,7 +43,7 @@ class MovementController:
 
     # ------------------------------------------------------------------
     def initialize(self):
-        """Prepare movement hardware but DO NOT enable the motors."""
+        """Prepare movement hardware but DO NOT enable the motors or watchdog."""
 
         version = self._rc.read_version()
 
@@ -54,9 +59,8 @@ class MovementController:
 
         self._rc.set_stop_policy(False)
 
-        self._rc.configure_watchdog(enable=True, brake_on_expiry=False)
+        self._rc.configure_watchdog(enable=False, brake_on_expiry=False)
 
-        self._rc.kick_watchdog()
         self._rc.clear_fault_bits(watchdog=True)
         self._rc.clear_estop()
 
@@ -64,15 +68,18 @@ class MovementController:
 
     # ------------------------------------------------------------------
     def arm(self):
-        """Enable motion after supervisor authorization."""
+        """Enable watchdog and motion after supervisor authorization."""
 
+        # Motors must still be off at this point
+        if self._rc.is_enabled():
+            raise RuntimeError("Motor controller unexpectedly enabled before arm")
+
+        self._rc.configure_watchdog(enable=True, brake_on_expiry=False)
         self._rc.kick_watchdog()
         self._rc.enable(True)
 
         if not self._rc.is_enabled():
-            raise RuntimeError(
-                "Motor controller failed to enable"
-            )
+            raise RuntimeError("Motor controller failed to enable")
 
     # ------------------------------------------------------------------
     def step(self, event=None, mono_now: float = None) -> dict:
@@ -106,6 +113,7 @@ class MovementController:
         left_s = right_s = 0
 
         match self._state:
+
             case 'STOP_HOLD':
                 self._rc.coast_both()
                 action = 'COAST'
@@ -114,8 +122,12 @@ class MovementController:
                     self._stop_cooldown_until = mono_now + STOP_COOLDOWN_S
                     self._state = 'LINE_FOLLOW'
                     action = 'RESUME'
+
             case 'LINE_FOLLOW':
                 left_s, right_s, action = self._apply_line_follow(ir)
+
+            case _:
+                raise RuntimeError(f"Unknown movement state: {self._state}")
 
         self._iter_count += 1
         return {
@@ -183,8 +195,6 @@ class MovementController:
             return p.corner_inner, p.turn_outer, 'CORNER'
 
     # ------------------------------------------------------------------
-    def enable(self, on: bool) -> None:
-        self._rc.enable(on)
 
     def safe_stop(self) -> None:
         self._rc.coast_both()
@@ -247,6 +257,7 @@ def movement_process(inf_to_mov_q, shutdown_event, ready_event, startup_q, enabl
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
     ctrl = None
+    startup_complete = False
 
     try:
         # --------------------------------
@@ -263,6 +274,7 @@ def movement_process(inf_to_mov_q, shutdown_event, ready_event, startup_q, enabl
 
         startup_q.put({**startup_info, 'ok': True})
         ready_event.set()
+        startup_complete = True
 
         # --------------------------------
         # Supervisor authorization
@@ -283,14 +295,16 @@ def movement_process(inf_to_mov_q, shutdown_event, ready_event, startup_q, enabl
 
     except Exception as exc:
         print(f"[movement] Exception: {exc}", flush=True)
+
         import traceback;
         traceback.print_exc()
 
-        try:
-            startup_q.put({'ok': False, 'error': str(exc)})
-            ready_event.set()
-        except Exception:
-            pass
+        if not startup_complete:
+            try:
+                startup_q.put({'ok': False, 'error': str(exc)})
+                ready_event.set()
+            except Exception:
+                pass
 
     finally:
         if ctrl is not None:
