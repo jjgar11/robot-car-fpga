@@ -9,7 +9,7 @@ import signal
 import sys
 import time
 
-from config import DemoConfig
+from config import DemoConfig, DetectionEvent
 from proc_inference import inference_process
 from proc_movement import movement_process
 from proc_camera import camera_process
@@ -47,10 +47,10 @@ def validate_files(config):
 # ---------------------------------------------------------------------------
 # Process launchers
 # ---------------------------------------------------------------------------
-def start_inference(cam_to_inf_q, inf_to_mov_q, inf_to_com_q, shutdown_event, ready_event, config):
+def start_inference(cam_to_inf_q, inf_to_mov_q, inf_to_com_q, shutdown_event, ready_event, config, detection_event):
     p = multiprocessing.Process(
         target=inference_process,
-        args=(cam_to_inf_q, inf_to_mov_q, inf_to_com_q, shutdown_event, ready_event, config),
+        args=(cam_to_inf_q, inf_to_mov_q, inf_to_com_q, shutdown_event, ready_event, config, detection_event),
         name='inference',
         daemon=False,
     )
@@ -115,6 +115,7 @@ def shutdown_all(processes, shutdown_event, timeout_each=5.0):
 def main():
 
     config = DemoConfig()
+    detection_event = DetectionEvent
 
     # Pre-flight: skip hardware checks in dry-run mode
     validate_files(config)
@@ -153,7 +154,7 @@ def main():
         # 1. Inference first (programs FPGA — longest startup)
         print("[supervisor] Starting inference process …", flush=True)
         proc_inference = start_inference(
-            cam_to_inf_q, inf_to_mov_q, inf_to_com_q, shutdown_event, inf_ready_event, config,
+            cam_to_inf_q, inf_to_mov_q, inf_to_com_q, shutdown_event, inf_ready_event, config, detection_event,
         )
         processes.append(proc_inference)
         if not inf_ready_event.wait(timeout=TIMEOUT_INFERENCE):

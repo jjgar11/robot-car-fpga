@@ -133,20 +133,21 @@ class MovementController:
         """
         p = self._profile
         if ir == 0b00:   # both white → go straight
-            self._rc.set_left(p.base_duty)
-            self._rc.set_right(p.base_duty)
+            self._rc.set_left(True, p.base_duty)
+            self._rc.set_right(True, p.base_duty)
             return p.base_duty, p.base_duty, 'STRAIGHT'
         elif ir == 0b01: # left black → turn left
             self._rc.coast_left()
-            self._rc.set_right(p.turn_outer)
+            self._rc.set_right(True, p.turn_outer)
             return 0, p.turn_outer, 'TURN_LEFT'
         elif ir == 0b10: # right black → turn right
-            self._rc.set_left(p.turn_outer)
+            self._rc.set_left(True, p.turn_outer)
             self._rc.coast_right()
             return p.turn_outer, 0, 'TURN_RIGHT'
-        else:            # 0x03 both black → corner CCW
-            self._rc.brake_both()
-            return 0, 0, 'LOST'
+        else:            # 0b11 both black → corner CCW
+            self._rc.set_left(True, p.corner_inner)
+            self._rc.set_right(True, p.turn_outer)
+            return p.corner_inner, p.turn_outer, 'CORNER'
 
     # ------------------------------------------------------------------
     def enable(self, on: bool) -> None:
@@ -168,6 +169,9 @@ def movement_process(inf_to_mov_q, shutdown_event, ready_event, startup_q, enabl
     # 1. Ignore SIGINT in child (supervisor handles it)
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
+    rc = None
+    ctrl = None
+
     try:
         from pynq import MMIO
         from robot_control import RobotControl
@@ -178,7 +182,7 @@ def movement_process(inf_to_mov_q, shutdown_event, ready_event, startup_q, enabl
         # 6. Verify hardware version
         version = rc.read_version()
         if version != (1, 0, 0):
-            startup_q.put({'ok': False, 'error': f'Bad VERSION: 0x{version:08X}'})
+            startup_q.put({'ok': False, 'error': f'Bad VERSION: {version}'})
             ready_event.set()
             return
 

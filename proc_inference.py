@@ -13,7 +13,7 @@ from collections import deque
 import numpy as np
 from labels import LABELS_EN
 
-def inference_process(cam_to_inf_q, inf_to_mov_q, inf_to_com_q, shutdown_event, ready_event, config):
+def inference_process(cam_to_inf_q, inf_to_mov_q, inf_to_com_q, shutdown_event, ready_event, config, detection_event):
     """Child-process entry point for inference."""
     # Ignore SIGINT — supervisor handles shutdown
     signal.signal(signal.SIGINT, signal.SIG_IGN)
@@ -46,7 +46,7 @@ def inference_process(cam_to_inf_q, inf_to_mov_q, inf_to_com_q, shutdown_event, 
             # Apply temporal filter
             stable = temporal.update(result['scores'])
 
-            event = config.DetectionEvent(
+            event = detection_event(
                 class_id  = stable.get('class_id') or 0,
                 label     = stable.get('label', ''),
                 score_sum = stable.get('score_sum') or 0.0,
