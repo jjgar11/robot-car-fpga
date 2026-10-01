@@ -16,8 +16,13 @@ class DemoConfig:
     crop_fraction: float = 0.35
     tilt_fraction: float = 0.0
     input_size: int = 64
-    score_window: int = 5
     target_fps: float = 20.0
+
+    # Temporal Detection Filter
+    score_window: int = 5
+    stable_ratio = 0.60
+    max_misses = 3
+    iou_threshold = 0.30
 
     # FINN deployment
     base_dir: Path = Path("/home/xilinx/overlays/deploy_optimized")
@@ -51,11 +56,65 @@ class DemoConfig:
 """IPC message types shared between robot processes."""
 @dataclass
 class DetectionEvent:
-    """Carries a sign-detection result from inference to downstream processes."""
-    class_id: int
-    label: str
-    score_sum: float
-    timestamp: float = field(default_factory=time.monotonic)
-    frame_id: int = 0
-    ready: bool = False  # True when temporal filter has a stable result
-    fpga_ms: float = 0.0  # FPGA inference duration, for logging/telemetry only
+    detections: list[dict]
+    timestamp: float
+    frame_timestamp: float
+    frame_id: int
+    ready: bool
+    detect_ms: float
+    filter_ms: float
+    fpga_total_ms: float
+    fpga_avg_ms: float
+    classifier_calls: int
+    queue_delay_ms: float
+    end_to_end_ms: float
+    raw_detection_count: int
+    grouped_detection_count: int
+
+    @property
+    def primary_detection(self):
+        return self.detections[0] if self.detections else None
+
+    @property
+    def stable_detection_count(self):
+        return len(self.detections)
+
+    @property
+    def non_fpga_ms(self):
+        return max(0.0, self.detect_ms - self.fpga_total_ms)
+
+    def to_dict(self, include_scores=False):
+        detections = []
+        for detection in self.detections:
+            item = detection.copy()
+            if "bbox" in item: item["bbox"] = [int(v) for v in item["bbox"]]
+            if "scores" in item:
+                if include_scores:
+                    scores = item["scores"]
+                    item["scores"] = scores.tolist() if hasattr(scores, "tolist") else list(scores)
+                else: item.pop("scores")
+            detections.append(item)
+        return {
+            "type": "detection_event",
+            "version": 1,
+            "frame_id": self.frame_id,
+            "timestamp": self.timestamp,
+            "frame_timestamp": self.frame_timestamp,
+            "ready": self.ready,
+            "detections": detections,
+            "counts": {
+                "raw_detections": self.raw_detection_count,
+                "grouped_detections": self.grouped_detection_count,
+                "stable_detections": self.stable_detection_count,
+                "classifier_calls": self.classifier_calls
+            },
+            "timing": {
+                "queue_delay_ms": self.queue_delay_ms,
+                "detect_ms": self.detect_ms,
+                "filter_ms": self.filter_ms,
+                "fpga_total_ms": self.fpga_total_ms,
+                "fpga_avg_ms": self.fpga_avg_ms,
+                "non_fpga_ms": self.non_fpga_ms,
+                "end_to_end_ms": self.end_to_end_ms
+            },
+        }

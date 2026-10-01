@@ -1,5 +1,4 @@
 import torch
-import lightning.pytorch as L
 from torch import nn
 from torch.nn import Conv2d, Linear, ReLU, Sequential, ModuleDict, Sigmoid, MaxPool2d
 from torchvision.transforms.v2.functional import pad, to_pil_image
@@ -17,7 +16,7 @@ MIN_SIGN_SIZE = 100 # filter out far away signs
 resize = Resize(64)
 
 
-class Classifier(L.LightningModule):
+class Classifier(nn.Module):
     def __init__(self, filename=None):
         super().__init__()
         # setup model
@@ -93,7 +92,7 @@ class Classifier(L.LightningModule):
         self.model.load_state_dict(state_dict)
 
 
-class Locator(L.LightningModule):
+class Locator(nn.Module):
     def __init__(self, filename=None, threshold_exclusion=0.5, threshold_detection=0.5):
         super().__init__()
         self.threshold_exclusion = torch.tensor(threshold_exclusion)
@@ -240,9 +239,9 @@ def run_inference(image, locator: Locator, label_func):
             # check if patch has sign candidate
             if detection_score > locator.threshold_detection:
                 # crop sign candidate
-                abs_sign_x = torch.tensor((sign_x * patch_size) + patch_x, dtype=torch.int16)
-                abs_sign_y = torch.tensor((sign_y * patch_size) + patch_y, dtype=torch.int16)
-                abs_sign_size = torch.tensor((sign_size * patch_size), dtype=torch.int16)
+                abs_sign_x = ((sign_x * patch_size) + patch_x).detach().clone().to(dtype=torch.int16)
+                abs_sign_y = ((sign_y * patch_size) + patch_y).detach().clone().to(dtype=torch.int16)
+                abs_sign_size = ((sign_size * patch_size)).detach().clone().to(dtype=torch.int16)
                 # get sign top left corner coordinates, clamp to prevent getting out of bounds
                 sign_corner_x = torch.clamp(torch.round(abs_sign_x - (0.5 * abs_sign_size)).to(dtype=torch.int16),
                                             torch.tensor(0), padded_image.size(-1) - abs_sign_size)
@@ -253,12 +252,14 @@ def run_inference(image, locator: Locator, label_func):
                 # resize and apply classifier model
                 if abs_sign_size > 16:
                     scaled_sign_candidate = resize(sign_candidate)
-                    label = torch.argmax(torch.squeeze(label_func(scaled_sign_candidate)))
+                    infered = label_func(scaled_sign_candidate)
+                    label = infered["class_id"]
                 else:
                     label = 0
                 # if classification successful, add to detections results
                 if label > 0:
-                    detected_signs.append((label, abs_sign_x, abs_sign_y, abs_sign_size))
+                    infered["bbox"] = (abs_sign_x, abs_sign_y, abs_sign_size)
+                    detected_signs.append(infered)
                 # otherwise, split patch and submit for next iteration
                 else:
                     next_patches.extend(split_patch(patch_x, patch_y, patch_size))
@@ -282,6 +283,6 @@ def detect(image, locator: Locator, label_func):
     sign_candidates = run_inference(image, locator, label_func)
     signs = []
     for sign_candidate in sign_candidates:
-        if sign_candidate[3] >= MIN_SIGN_SIZE:
-            signs.append(sign_candidate[0])
+        if sign_candidate["bbox"][2] >= MIN_SIGN_SIZE:
+            signs.append(sign_candidate)
     return signs

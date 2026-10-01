@@ -104,9 +104,11 @@ class MovementController:
 
         # 3. Process incoming sign event
         if event is not None and event.ready:
-            age = mono_now - event.timestamp
+            age = mono_now - event.frame_timestamp
             if age <= MAX_EVENT_AGE_S:
-                self._handle_event(event, mono_now)
+                primary = event.primary_detection
+                if primary is not None:
+                    self._handle_event(primary["class_id"], mono_now)
 
         # 4. State machine
         action = 'NONE'
@@ -153,8 +155,8 @@ class MovementController:
         return (right_black << 1) | left_black
 
     # ------------------------------------------------------------------
-    def _handle_event(self, event, mono_now: float) -> None:
-        category = classify_sign(event.class_id)
+    def _handle_event(self, class_id, mono_now: float) -> None:
+        category = classify_sign(class_id)
 
         if self._state == 'LINE_FOLLOW':
 

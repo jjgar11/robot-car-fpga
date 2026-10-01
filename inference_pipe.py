@@ -1,9 +1,10 @@
 import sys
 import time
 import numpy as np
+import torch
 
 from labels import LABELS_EN
-
+from Detect import Locator, detect
 
 class InferencePipe:
     """
@@ -18,6 +19,7 @@ class InferencePipe:
         self.config = config
         self.clear_pynq_state = clear_pynq_state
         self.accel = None
+        self.locator = Locator('locator.pth') 
 
         self._load_overlay()
 
@@ -37,22 +39,19 @@ class InferencePipe:
             batch_size=self.BATCH_SIZE,
             fclk_mhz=self.config.fclk_mhz,
             download=True,
-            runtime_weight_dir=(
-                self.config.runtime_weight_dir
-            ),
+            runtime_weight_dir=self.config.runtime_weight_dir,
         )
 
-        print("FINN overlay loaded")
-        print("bitfile:", self.accel.bitfile_name)
-        print("runtime batch:", self.BATCH_SIZE)
+        print("[inference] FINN overlay loaded", flush=True)
+        print(f"[inference] bitfile={self.accel.bitfile_name}", flush=True)
+        print(f"[inference] runtime_batch={self.BATCH_SIZE}", flush=True)
 
     @staticmethod
     def pack_input_int4_fast(x_folded):
         x = np.asarray(x_folded)
 
         if x.shape[-1] != 3:
-            raise ValueError(f"Unexpected folded shape: "
-                f"{x.shape}")
+            raise ValueError(f"Unexpected folded shape: {x.shape}")
 
         if (np.any(x < -8) or np.any(x > 7)):
             raise ValueError(
@@ -71,17 +70,17 @@ class InferencePipe:
 
         return out
 
-    def infer_preprocessed(self, x_frame):
-        x_batch = np.asarray(x_frame)[np.newaxis, ...]
+    def label_func(self, frame64):
+        """Classify one detector crop and preserve all 44 FINN scores."""
 
-        expected = (1, self.config.input_size, self.config.input_size, 3)
+        # Torch BCHW -> NumPy BCHW
+        x_float = (frame64.detach().cpu().numpy().astype(np.float32) / 255.0)
 
-        if x_batch.shape != expected:
-            raise ValueError(
-                f"Unexpected input shape: "
-                f"{x_batch.shape}; "
-                f"expected {expected}"
-            )
+        # BCHW -> BHWC
+        x_float = np.transpose(x_float, (0, 2, 3, 1))
+
+        # Quantize INT4
+        x_batch = np.clip(np.floor(x_float * 8.0 + 0.5), -8, 7).astype(np.float32)
 
         folded = self.accel.fold_input(x_batch, ind=0)
 
@@ -107,7 +106,7 @@ class InferencePipe:
         while True:
             status = odma.read(0x00)
 
-            if status & 0x2: 
+            if status & 0x2:
                 fpga_end = time.perf_counter()
                 break
 
@@ -116,7 +115,10 @@ class InferencePipe:
 
             time.sleep(0.0001)
 
-        fpga_ms = (fpga_end - fpga_start) * 1_000.0
+        fpga_ms = (fpga_end - fpga_start) * 1000.0
+
+        self._frame_fpga_ms += fpga_ms
+        self._frame_classifier_calls += 1
 
         self.accel.copy_output_data_from_device(self.accel.obuf_packed[0], ind=0)
 
@@ -129,14 +131,41 @@ class InferencePipe:
         class_id = int(np.argmax(scores))
 
         return {
-            "raw_class_id": class_id,
-            "raw_label": LABELS_EN[class_id],
-            "raw_score": float(scores[class_id]),
-            "scores": scores.copy(),
-            "fpga_ms": fpga_ms,
+            "class_id": class_id,
+            "scores": scores.copy()
         }
 
     def process_frame(self, x):
-        result = (self.infer_preprocessed(x))
+        """Run David's detector and FINN classification on one camera frame."""
 
-        return result
+        self._frame_fpga_ms = 0.0
+        self._frame_classifier_calls = 0
+
+        t0 = time.perf_counter()
+        
+        expected = (1, 3, self.config.camera_height, self.config.camera_width)
+
+        if x.shape != expected:
+            raise ValueError(
+                f"Unexpected input shape: {x.shape}; expected {expected}"
+            )
+
+        x = torch.from_numpy(x).float()
+        detections = detect(x, self.locator, self.label_func)
+        for detection in detections:
+            cx, cy, size = detection["bbox"]
+
+            detection["bbox"] = (
+                int(cx.item()) if torch.is_tensor(cx) else int(cx),
+                int(cy.item()) if torch.is_tensor(cy) else int(cy),
+                int(size.item()) if torch.is_tensor(size) else int(size),
+            )
+
+        detect_ms = (time.perf_counter() - t0) * 1000.0
+
+        return {
+            "detections": detections,
+            "fpga_ms": self._frame_fpga_ms,
+            "classifier_calls": self._frame_classifier_calls,
+            "detect_ms": detect_ms,
+        }

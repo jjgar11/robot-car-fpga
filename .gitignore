@@ -2,4 +2,5 @@
 *.npy
 *.pyc
 .idea/
+*.zip
 *.pth

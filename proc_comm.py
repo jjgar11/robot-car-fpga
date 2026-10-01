@@ -1,27 +1,19 @@
 """Communication / logging process.
 
-Receives DetectionEvents from the inference process:
-  - Writes structured JSON-lines records to disk (always).
-  - Encodes and sends (class_id, confidence) to a laptop via TCP (best-effort).
-
-TCP server is non-blocking: if no client is connected, detections are only
-logged to disk.  If the client disconnects, the server waits for a new one
-transparently.  Neither inference nor movement is blocked.
+Logs DetectionEvents, prints runtime diagnostics and sends JSON telemetry to a
+laptop over TCP without blocking inference or movement.
 """
 from __future__ import annotations
-
 import json
 import signal
+from queue import Empty
 
 
 def comm_process(inf_to_com_q, shutdown_event, ready_event, config):
     """Child-process entry point for the comms/logging process."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-
     from tcp_comm import RobotServer
-
     server = RobotServer(port=config.tcp_port)
-
     try:
         server.start()
 
@@ -29,52 +21,75 @@ def comm_process(inf_to_com_q, shutdown_event, ready_event, config):
             ready_event.set()
 
             while not shutdown_event.is_set():
-                # 1. Try to get a detection (short timeout to stay responsive)
                 event = None
+
                 try:
                     event = inf_to_com_q.get(timeout=0.1)
-                except Exception:
+                except Empty: 
                     pass
 
-                # 2. Try to accept a new TCP client (non-blocking, 0.1 s window)
-                if not server.has_client:
+                if not server.has_client: 
                     server.try_accept()
 
-                if event is None:
+                if event is None: 
                     continue
 
-                # 3. Human-readable console summary
+                payload = event.to_dict(include_scores=False)
+                status = "STABLE" if event.ready else "SEARCHING"
+
                 print(
-                    f"[comm] frame={event.frame_id:06d} "
-                    f"class={event.class_id:02d} "
-                    f"fpga_ms={event.fpga_ms:.3f}",
-                    f"label='{event.label}' "
-                    f"score={event.score_sum:.1f} "
-                    f"ready={event.ready}",
+                    f"[comm] frame={event.frame_id:06d} | "
+                    f"{status} | "
+                    f"raw={event.raw_detection_count} "
+                    f"grouped={event.grouped_detection_count} "
+                    f"stable={event.stable_detection_count} | "
+                    f"classifier_calls={event.classifier_calls}",
                     flush=True,
                 )
 
-                # 4. JSON Lines record
-                log.write(json.dumps({
-                    'fpga_ms':  event.fpga_ms,
-                    'frame_id': event.frame_id,
-                    'class_id': event.class_id,
-                    'label':    event.label,
-                    'score':    event.score_sum,
-                    'ready':    event.ready,
-                    'ts':       event.timestamp,
-                }) + '\n')
+                print(
+                    f"[comm] timing | "
+                    f"queue={event.queue_delay_ms:.1f} ms | "
+                    f"detect={event.detect_ms:.1f} ms | "
+                    f"filter={event.filter_ms:.2f} ms | "
+                    f"FPGA_total={event.fpga_total_ms:.1f} ms | "
+                    f"FPGA_avg={event.fpga_avg_ms:.2f} ms | "
+                    f"non_FPGA={event.non_fpga_ms:.1f} ms | "
+                    f"end_to_end={event.end_to_end_ms:.1f} ms",
+                    flush=True,
+                )
+
+                if event.detections:
+                    for index, detection in enumerate(event.detections, start=1):
+                        cx, cy, size = detection["bbox"]
+                        primary = " PRIMARY" if index == 1 else ""
+
+                        print(
+                            f"[comm]   #{index}{primary} | "
+                            f"{detection['label']} | "
+                            f"id={detection['class_id']} | "
+                            f"track={detection['track_id']} | "
+                            f"bbox_center=({cx},{cy}) size={size} | "
+                            f"hits={detection['hits']}/{detection['window_size']} | "
+                            f"score_sum={detection['score_sum']:.1f} | "
+                            f"score_mean={detection['score_mean']:.1f} | "
+                            f"raw_boxes={detection['raw_count']}",
+                            flush=True,
+                        )
+                else:
+                    print("[comm]   no stable traffic signs", flush=True)
+
+                log.write(json.dumps(payload, separators=(",", ":")) + "\\n")
                 log.flush()
 
-                # 5. TCP send — only when temporal filter is stable
-                if event.ready:
-                    confidence = max(0, int(event.score_sum))
-                    server.try_send(event.class_id, confidence)
+                if server.has_client:
+                    server.try_send(payload)
 
     except Exception as exc:
         print(f"[comm] Exception: {exc}", flush=True)
         import traceback
         traceback.print_exc()
+
     finally:
         server.close()
         print("[comm] process exiting", flush=True)
