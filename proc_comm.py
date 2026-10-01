@@ -47,6 +47,7 @@ def comm_process(inf_to_com_q, shutdown_event, ready_event, config):
                 print(
                     f"[comm] frame={event.frame_id:06d} "
                     f"class={event.class_id:02d} "
+                    f"fpga_ms={event.fpga_ms:.3f}",
                     f"label='{event.label}' "
                     f"score={event.score_sum:.1f} "
                     f"ready={event.ready}",

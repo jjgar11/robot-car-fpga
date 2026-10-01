@@ -20,7 +20,8 @@ class DemoConfig:
     target_fps: float = 20.0
 
     # FINN deployment
-    base_dir: Path = Path("/home/xilinx/overlays/nano_gtsrb_robot")
+    base_dir: Path = Path("/home/xilinx/overlays/deploy_optimized")
+    # base_dir: Path = Path("/home/xilinx/overlays/nano_gtsrb_robot")
     bitfile_name: str = "nano_gtsrb_robot.bit"
     hwhfile_name: str = "nano_gtsrb_robot.hwh"
     driver_dir_name: str = "driver"
