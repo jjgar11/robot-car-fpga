@@ -16,16 +16,11 @@ class CameraPipe:
 
     def __init__(self, config):
         self.config = config
-
         self.frames = deque(maxlen=2)
-
         self.condition = threading.Condition()
-
         self.running = False
         self.thread = None
-
         self.cap = None
-
         self.frame_id = 0
         self.invalid_frames = 0
 
@@ -42,18 +37,11 @@ class CameraPipe:
         if self.running:
             return
 
-        # Limpiar estado anterior
         self.frames.clear()
-
         self.frame_id = 0
         self.invalid_frames = 0
-
         self.capture_fps = 0.0
         self._fps_frames = 0
-
-        # -----------------------------------------------------
-        # Abrir cámara
-        # -----------------------------------------------------
 
         self.cap = cv2.VideoCapture(
             self.config.camera_device,
@@ -65,10 +53,6 @@ class CameraPipe:
                 f"No se pudo abrir "
                 f"{self.config.camera_device}"
             )
-
-        # -----------------------------------------------------
-        # Configuración conocida que ya probamos
-        # -----------------------------------------------------
 
         self.cap.set(
             cv2.CAP_PROP_FOURCC,
@@ -92,13 +76,8 @@ class CameraPipe:
             self.config.camera_fps,
         )
 
-        # IMPORTANTE:
         # NO usar CAP_PROP_BUFFERSIZE = 1.
         # Ya comprobamos que perjudicaba el rendimiento.
-
-        # -----------------------------------------------------
-        # Leer configuración realmente aceptada
-        # -----------------------------------------------------
 
         width = int(
             self.cap.get(
@@ -137,10 +116,7 @@ class CameraPipe:
             f"[{fourcc_str}]"
         )
 
-        # -----------------------------------------------------
         # Warmup
-        # -----------------------------------------------------
-
         for _ in range(5):
             ret, frame = self.cap.read()
 
@@ -165,13 +141,8 @@ class CameraPipe:
                 "Camera opened but produced no frames"
             )
 
-        # -----------------------------------------------------
-        # Iniciar captura continua
-        # -----------------------------------------------------
-
         self._fps_start = time.perf_counter()
         self._fps_frames = 0
-
         self.running = True
 
         self.thread = threading.Thread(
@@ -188,15 +159,11 @@ class CameraPipe:
 
     def _capture_loop(self):
         while self.running:
-
             ret, frame = self.cap.read()
 
             if not ret or frame is None:
-
                 self.invalid_frames += 1
-
                 time.sleep(0.005)
-
                 continue
 
             timestamp = time.perf_counter()
@@ -213,7 +180,6 @@ class CameraPipe:
             )
 
             if elapsed >= 1.0:
-
                 self.capture_fps = (
                     self._fps_frames
                     / elapsed
@@ -235,7 +201,6 @@ class CameraPipe:
             self.frame_id += 1
 
             with self.condition:
-
                 self.frames.append(
                     item
                 )
@@ -251,18 +216,14 @@ class CameraPipe:
         after_id=-1,
         timeout_s=1.0,
     ):
-
         deadline = (
             time.perf_counter()
             + timeout_s
         )
 
         with self.condition:
-
             while self.running:
-
                 if self.frames:
-
                     frame = self.frames[-1]
 
                     if frame[0] > after_id:
@@ -274,7 +235,6 @@ class CameraPipe:
                 )
 
                 if remaining <= 0:
-
                     raise TimeoutError(
                         "Timed out waiting "
                         "for camera frame"
@@ -296,7 +256,6 @@ class CameraPipe:
     # =========================================================
 
     def stop(self):
-
         if not self.running:
             return
 
@@ -305,16 +264,12 @@ class CameraPipe:
         with self.condition:
             self.condition.notify_all()
 
-        # cap.read() debería retornar rápidamente
-        # porque la cámara trabaja ~30 FPS.
         if self.thread is not None:
-
             self.thread.join(
                 timeout=2.0
             )
 
         if self.cap is not None:
-
             self.cap.release()
             self.cap = None
 

@@ -2,9 +2,12 @@ from dataclasses import dataclass, asdict
 import threading
 import time
 
+import cv2
+import numpy as np
+
 from camera_pipe import CameraPipe
 from inference_pipe import InferencePipe
-from temporal_filter import TemporalScoreFilter
+from proc_inference import TemporalScoreFilter
 from integration_pipes import (
     MovementPipe,
     CommunicationPipe,
@@ -48,6 +51,8 @@ class PipeManager:
     Current four-pipe architecture:
 
         CameraPipe
+            ↓
+        preprocessing
             ↓
         InferencePipe
             ↓
@@ -110,6 +115,86 @@ class PipeManager:
         self.running = False
         self.stop_event = (
             threading.Event()
+        )
+
+    def _preprocess(self, frame_bgr):
+        t0 = time.perf_counter()
+
+        frame_rgb = cv2.cvtColor(
+            frame_bgr,
+            cv2.COLOR_BGR2RGB,
+        )
+
+        h, w = frame_rgb.shape[:2]
+
+        side = int(
+            min(h, w)
+            * self.config.crop_fraction
+        )
+
+        side = max(
+            side,
+            self.config.input_size,
+        )
+
+        x0 = (w - side) // 2
+
+        max_shift = (
+            h - side
+        ) // 2
+
+        y0 = (
+            (h - side) // 2
+            + int(
+                max_shift
+                * self.config.tilt_fraction
+            )
+        )
+
+        y0 = max(
+            0,
+            min(
+                y0,
+                h - side,
+            ),
+        )
+
+        crop = frame_rgb[
+            y0:y0 + side,
+            x0:x0 + side,
+        ]
+
+        frame64 = cv2.resize(
+            crop,
+            (
+                self.config.input_size,
+                self.config.input_size,
+            ),
+            interpolation=cv2.INTER_AREA,
+        )
+
+        x_float = (
+            frame64.astype(np.float32)
+            / 255.0
+        )
+
+        x_int4 = np.clip(
+            np.floor(
+                x_float * 8.0
+                + 0.5
+            ),
+            -8,
+            7,
+        ).astype(np.float32)
+
+        preprocess_ms = (
+            time.perf_counter()
+            - t0
+        ) * 1000.0
+
+        return (
+            x_int4,
+            preprocess_ms,
         )
 
     def start(self):
@@ -190,11 +275,21 @@ class PipeManager:
                     self.camera.capture_fps
                 )
 
-                result = (
-                    self.inference.process_frame(
+                frame64, preprocess_ms = (
+                    self._preprocess(
                         frame_bgr
                     )
                 )
+
+                result = (
+                    self.inference.process_frame(
+                        frame64
+                    )
+                )
+
+                result[
+                    "preprocess_ms"
+                ] = preprocess_ms
 
                 stable = (
                     self.temporal.update(
