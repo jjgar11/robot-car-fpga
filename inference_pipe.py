@@ -20,7 +20,9 @@ class InferencePipe:
         self.clear_pynq_state = clear_pynq_state
         self.accel = None
         self.locator = Locator('locator.pth') 
+        torch.set_num_threads(3)  # 4 threads oversubscribe the 4 cores shared with the camera process
         self._output_verified = False
+        self._input_verified = False
 
         self._load_overlay()
 
@@ -48,22 +50,12 @@ class InferencePipe:
         print(f"[inference] runtime_batch={self.BATCH_SIZE}", flush=True)
 
     @staticmethod
-    def pack_input_int4_fast(x_folded):
-        x = np.asarray(x_folded)
+    def quantize_pack_int4(crops):
+        """(N,64,64,3) float crops -> floor(x*8+0.5) clamped to INT4, packed as N FINN (1,64,64,1,2) buffers."""
+        x = np.clip(np.floor(crops * 8.0 + 0.5), -8, 7)
+        u = (x.astype(np.int8).view(np.uint8) & 0xF)[:, None, :, :, None, :]
 
-        if x.shape[-1] != 3:
-            raise ValueError(f"Unexpected folded shape: {x.shape}")
-
-        if (np.any(x < -8) or np.any(x > 7)):
-            raise ValueError(
-                f"INT4 out of range: "
-                f"min={x.min()}, "
-                f"max={x.max()}"
-            )
-
-        u = (x.astype(np.int16) & 0xF).astype(np.uint8)
-
-        out = np.empty(x.shape[:-1] + (2,), dtype=np.uint8)
+        out = np.empty(u.shape[:-1] + (2,), dtype=np.uint8)
 
         out[..., 0] = (u[..., 0] | (u[..., 1] << 4))
 
@@ -74,18 +66,15 @@ class InferencePipe:
     def label_func(self, frame64):
         """Classify one detector crop and preserve all 44 FINN scores."""
 
-        # Torch BCHW -> NumPy BCHW
-        x_float = frame64.detach().cpu().numpy().astype(np.float32)
+        # Torch BCHW -> NumPy BHWC
+        x_float = np.transpose(frame64.detach().cpu().numpy(), (0, 2, 3, 1))
 
-        # BCHW -> BHWC
-        x_float = np.transpose(x_float, (0, 2, 3, 1))
-
-        # Quantize INT4
-        x_batch = np.clip(np.floor(x_float * 8.0 + 0.5), -8, 7).astype(np.float32)
-
-        folded = self.accel.fold_input(x_batch, ind=0)
-
-        packed = (self.pack_input_int4_fast(folded))
+        packed = self.quantize_pack_int4(x_float)[0]
+        if not self._input_verified:
+            x_batch = np.clip(np.floor(x_float.astype(np.float32) * 8.0 + 0.5), -8, 7).astype(np.float32)
+            if not np.array_equal(packed, self.accel.pack_input(self.accel.fold_input(x_batch, ind=0), ind=0)): raise RuntimeError("Fast INT4 input differs from FINN driver")
+            self._input_verified = True
+            print("[inference] Fast INT4 input verified against FINN driver", flush=True)
 
         np.copyto(self.accel.ibuf_packed_device[0], packed)
 

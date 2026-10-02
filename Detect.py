@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from torch.nn.functional import interpolate
 from torch.nn import Conv2d, Linear, ReLU, Sequential, ModuleDict, Sigmoid, MaxPool2d
 from torchvision.transforms.v2.functional import pad, to_pil_image
 from torchvision.transforms.v2 import Resize
@@ -194,6 +195,7 @@ def split_patch(patch_x, patch_y, patch_size):
     return sub_patches
 
 
+@torch.no_grad()
 def run_inference(image, locator: Locator, label_func):
     detected_signs = []
     # enforce batch size of 1
@@ -205,7 +207,6 @@ def run_inference(image, locator: Locator, label_func):
     pad_top = int((torch.ceil(image_height / MAX_PATCH_SIZE) * MAX_PATCH_SIZE) - image_height)
     pad_left = int((torch.ceil(image_width / MAX_PATCH_SIZE) * MAX_PATCH_SIZE) - image_width)
     padded_image = pad(image, [pad_left, pad_top, 0, 0])
-    image_copy = padded_image.detach().clone()
     # generate initial set of patches
     next_patches = []   # x, y, size
     num_x_pos = int(((padded_image.size(-1) / MAX_PATCH_SIZE) * (int(1 / PATCH_STRIDE))) - (int(1 / PATCH_STRIDE) - 1))
@@ -224,12 +225,12 @@ def run_inference(image, locator: Locator, label_func):
             break
         current_patches = [patch for patch in next_patches]
         next_patches = []
-        for patch_x, patch_y, patch_size in current_patches:
-            # crop patch from image
-            patch = padded_image[:, :, patch_y:patch_y + patch_size, patch_x:patch_x + patch_size]
-            # resize and apply locator model
-            resized_patch = resize(patch)
-            result = torch.squeeze(locator(resized_patch))
+        # crop and resize all square patches of this level at once (bit-exact with per-patch Resize(64))
+        resized_patches = interpolate(torch.cat([padded_image[:, :, y:y + s, x:x + s] for x, y, s in current_patches]),
+                                      size=[64, 64], mode="bilinear", align_corners=False, antialias=True)
+        for (patch_x, patch_y, patch_size), resized_patch in zip(current_patches, resized_patches):
+            # apply locator model
+            result = torch.squeeze(locator(resized_patch[None]))
             # unpack results
             exclusion_score = result[0]
             detection_score = result[1]

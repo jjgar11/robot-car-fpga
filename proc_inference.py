@@ -33,16 +33,13 @@ def inference_process(cam_to_inf_q, inf_to_mov_q, inf_to_com_q, shutdown_event, 
         )
 
         ready_event.set()
-        last_frame_id = None
+        last_frame_id = -1
 
         while not shutdown_event.is_set():
-            try:
-                frame_id, frame_timestamp, frame = cam_to_inf_q.get(timeout=0.5)
-            except Empty:
+            item = cam_to_inf_q.get(last_frame_id, timeout=0.5)
+            if item is None:
                 continue
-
-            if frame_id == last_frame_id:
-                continue
+            frame_id, frame_timestamp, frame = item
             last_frame_id = frame_id
 
             inference_start = time.monotonic()
