@@ -20,6 +20,7 @@ class InferencePipe:
         self.clear_pynq_state = clear_pynq_state
         self.accel = None
         self.locator = Locator('locator.pth') 
+        self._output_verified = False
 
         self._load_overlay()
 
@@ -122,7 +123,15 @@ class InferencePipe:
 
         self.accel.copy_output_data_from_device(self.accel.obuf_packed[0], ind=0)
 
-        obuf_folded = (self.accel.unpack_output(self.accel.obuf_packed[0], ind=0))
+        packed_output = np.asarray(self.accel.obuf_packed[0])
+        if packed_output.dtype != np.uint8 or packed_output.shape != (1, 44, 2):
+            raise ValueError(f"Unexpected packed output: {packed_output.shape}, {packed_output.dtype}")
+        obuf_folded = np.ascontiguousarray(packed_output).view("<i2").reshape(1, 44, 1).astype(np.float32)
+        if not self._output_verified:
+            reference = self.accel.unpack_output(self.accel.obuf_packed[0], ind=0)
+            if not np.array_equal(obuf_folded, reference): raise RuntimeError("Fast INT16 output differs from FINN driver")
+            self._output_verified = True
+            print("[inference] Fast INT16 output verified against FINN driver", flush=True)
 
         y = self.accel.unfold_output(obuf_folded, ind=0).copy()
 
