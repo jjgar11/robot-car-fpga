@@ -1,10 +1,9 @@
 import sys
 import time
 import numpy as np
-import torch
+import cv2
 
 from labels import LABELS_EN
-from Detect import Locator, detect
 
 class InferencePipe:
     """
@@ -19,7 +18,6 @@ class InferencePipe:
         self.config = config
         self.clear_pynq_state = clear_pynq_state
         self.accel = None
-        self.locator = Locator('locator.pth') 
 
         self._load_overlay()
 
@@ -73,11 +71,8 @@ class InferencePipe:
     def label_func(self, frame64):
         """Classify one detector crop and preserve all 44 FINN scores."""
 
-        # Torch BCHW -> NumPy BCHW
-        x_float = frame64.detach().cpu().numpy().astype(np.float32)
-
-        # BCHW -> BHWC
-        x_float = np.transpose(x_float, (0, 2, 3, 1))
+        # RGB HWC -> normalized BHWC
+        x_float = frame64.astype(np.float32)[None, ...]
 
         # Quantize INT4
         x_batch = np.clip(np.floor(x_float * 8.0 + 0.5), -8, 7).astype(np.float32)
@@ -136,7 +131,7 @@ class InferencePipe:
         }
 
     def process_frame(self, x):
-        """Run David's detector and FINN classification on one camera frame."""
+        """Classify fixed crops and sum scores from crops whose label is not 0."""
 
         self._frame_fpga_ms = 0.0
         self._frame_classifier_calls = 0
@@ -150,21 +145,51 @@ class InferencePipe:
                 f"Unexpected input shape: {x.shape}; expected {expected}"
             )
 
-        x = torch.from_numpy(x).float()
-        detections = detect(x, self.locator, self.label_func)
-        for detection in detections:
-            cx, cy, size = detection["bbox"]
+        height, width = x.shape[-2:]
+        image = np.transpose(x[0], (1, 2, 0))
+        detections, crop_labels = [], []
 
-            detection["bbox"] = (
-                int(cx.item()) if torch.is_tensor(cx) else int(cx),
-                int(cy.item()) if torch.is_tensor(cy) else int(cy),
-                int(size.item()) if torch.is_tensor(size) else int(size),
-            )
+        for fraction in self.config.crop_sizes:
+            size = max(1, min(min(height, width), round(min(height, width) * fraction)))
+    
+            for px, py in self.config.crop_positions:
+
+                left = max(0, min(width - size, round(px * width - size / 2)))
+                top = max(0, min(height - size, round(py * height - size / 2)))
+                crop = image[top:top + size, left:left + size]
+
+                crop64 = cv2.resize(crop, (self.config.input_size, self.config.input_size), interpolation=cv2.INTER_AREA)
+                detection = self.label_func(crop64)
+                crop_labels.append(detection["class_id"])
+
+                if detection["class_id"] == 0: 
+                    continue
+
+                detection["bbox"] = (left + size / 2, top + size / 2, size)
+                detections.append(detection)
+
+        frame_detection = None
+
+        if detections:
+            scores = np.sum(np.stack([d["scores"] for d in detections]), axis=0, dtype=np.float64)
+            class_id = int(np.argmax(scores))
+
+            if class_id != 0:
+                representative = max(detections, key=lambda d: d["scores"][class_id])
+                frame_detection = {
+                    "class_id": class_id, 
+                    "scores": scores, 
+                    "bbox": representative["bbox"], 
+                    "raw_count": len(detections)
+                }
 
         detect_ms = (time.perf_counter() - t0) * 1000.0
 
         return {
             "detections": detections,
+            "frame_detection": frame_detection,
+            "frame_class_id": frame_detection["class_id"] if frame_detection else 0,
+            "crop_labels": crop_labels,
             "fpga_ms": self._frame_fpga_ms,
             "classifier_calls": self._frame_classifier_calls,
             "detect_ms": detect_ms,

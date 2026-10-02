@@ -41,7 +41,7 @@ def comm_process(inf_to_com_q, shutdown_event, ready_event, config):
                     f"[comm] frame={event.frame_id:06d} | "
                     f"{status} | "
                     f"raw={event.raw_detection_count} "
-                    f"grouped={event.grouped_detection_count} "
+                    f"frame_sign={event.grouped_detection_count} "
                     f"stable={event.stable_detection_count} | "
                     f"classifier_calls={event.classifier_calls}",
                     flush=True,
@@ -68,12 +68,11 @@ def comm_process(inf_to_com_q, shutdown_event, ready_event, config):
                             f"[comm]   #{index}{primary} | "
                             f"{detection['label']} | "
                             f"id={detection['class_id']} | "
-                            f"track={detection['track_id']} | "
-                            f"bbox_center=({cx},{cy}) size={size} | "
+                            f"crop_center=({cx},{cy}) size={size} | "
                             f"hits={detection['hits']}/{detection['window_size']} | "
                             f"score_sum={detection['score_sum']:.1f} | "
                             f"score_mean={detection['score_mean']:.1f} | "
-                            f"raw_boxes={detection['raw_count']}",
+                            f"accepted_crops={detection['raw_count']}",
                             flush=True,
                         )
                 else:

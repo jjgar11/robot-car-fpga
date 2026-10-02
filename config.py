@@ -19,10 +19,14 @@ class DemoConfig:
     target_fps: float = 20.0
 
     # Temporal Detection Filter
-    score_window: int = 5
-    stable_ratio = 0.60
-    max_misses = 3
-    iou_threshold = 0.30
+    score_window: int = 10
+    min_hits: int = 2
+    crop_sizes: tuple = (0.40, 0.60)
+    crop_positions: tuple = (
+        (0.35, 0.45), (0.50, 0.45), (0.65, 0.45),
+        (0.35, 0.60), (0.50, 0.60), (0.65, 0.60),
+        (0.50, 0.50),
+    )
 
     # FINN deployment
     base_dir: Path = Path("/home/xilinx/overlays/deploy_optimized")
