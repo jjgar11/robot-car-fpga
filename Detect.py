@@ -197,6 +197,9 @@ def split_patch(patch_x, patch_y, patch_size):
 
 @torch.no_grad()
 def run_inference(image, locator: Locator, label_func):
+    num_evaluated_patches = 0
+    num_classifier_calls = 0
+    num_excluded_patches = 0
     detected_signs = []
     # enforce batch size of 1
     assert image.size(0) == 1, "batch size of 1 required during inference"
@@ -229,6 +232,7 @@ def run_inference(image, locator: Locator, label_func):
         resized_patches = interpolate(torch.cat([padded_image[:, :, y:y + s, x:x + s] for x, y, s in current_patches]),
                                       size=[64, 64], mode="bilinear", align_corners=False, antialias=True)
         for (patch_x, patch_y, patch_size), resized_patch in zip(current_patches, resized_patches):
+            num_evaluated_patches += 1
             # apply locator model
             result = torch.squeeze(locator(resized_patch[None]))
             # unpack results
@@ -242,7 +246,7 @@ def run_inference(image, locator: Locator, label_func):
                 # crop sign candidate
                 abs_sign_x = ((sign_x * patch_size) + patch_x).detach().clone().to(dtype=torch.int16)
                 abs_sign_y = ((sign_y * patch_size) + patch_y).detach().clone().to(dtype=torch.int16)
-                abs_sign_size = ((sign_size * patch_size)).detach().clone().to(dtype=torch.int16)
+                abs_sign_size = (sign_size * patch_size).detach().clone().to(dtype=torch.int16)
                 # get sign top left corner coordinates, clamp to prevent getting out of bounds
                 sign_corner_x = torch.clamp(torch.round(abs_sign_x - (0.5 * abs_sign_size)).to(dtype=torch.int16),
                                             torch.tensor(0), padded_image.size(-1) - abs_sign_size)
@@ -251,7 +255,8 @@ def run_inference(image, locator: Locator, label_func):
                 sign_candidate = padded_image[:, :, sign_corner_y:sign_corner_y + abs_sign_size,
                                              sign_corner_x:sign_corner_x + abs_sign_size]
                 # resize and apply classifier model
-                if abs_sign_size > 16:
+                if abs_sign_size > MIN_SIGN_SIZE:
+                    num_classifier_calls += 1
                     scaled_sign_candidate = resize(sign_candidate)
                     infered = label_func(scaled_sign_candidate)
                     label = infered["class_id"]
@@ -267,9 +272,13 @@ def run_inference(image, locator: Locator, label_func):
             # if patch should not be excluded, split and submit for next iteration
             elif exclusion_score < locator.threshold_exclusion:
                 next_patches.extend(split_patch(patch_x, patch_y, patch_size))
+            elif exclusion_score >= locator.threshold_exclusion:
+                num_excluded_patches += 1
         current_iteration += 1
+    print("evaluated patches: " + str(num_evaluated_patches))
+    print("excluded patches: " + str(num_excluded_patches))
+    print("classifier calls: " + str(num_classifier_calls))
     return detected_signs
-
 
 """
 use like this:
