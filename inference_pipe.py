@@ -19,6 +19,7 @@ class InferencePipe:
         self.clear_pynq_state = clear_pynq_state
         self.accel = None
         self._output_verified = False
+        self._profile_frames = 0
 
         self._load_overlay()
 
@@ -72,20 +73,26 @@ class InferencePipe:
     def label_func(self, frame64):
         """Classify one detector crop and preserve all 44 FINN scores."""
 
+        stage = time.perf_counter()
         # RGB HWC -> normalized BHWC
         x_float = frame64.astype(np.float32)[None, ...]
 
         # Quantize INT4
         x_batch = np.clip(np.floor(x_float * 8.0 + 0.5), -8, 7).astype(np.float32)
 
+        stage = self._mark("quantize", stage)
         folded = self.accel.fold_input(x_batch, ind=0)
 
+        stage = self._mark("fold", stage)
         packed = (self.pack_input_int4_fast(folded))
 
+        stage = self._mark("pack", stage)
         np.copyto(self.accel.ibuf_packed_device[0], packed)
 
+        stage = self._mark("input_copy", stage)
         self.accel.ibuf_packed_device[0].flush()
 
+        stage = self._mark("input_flush", stage)
         idma = self.accel.idma[0]
         odma = self.accel.odma[0]
 
@@ -95,10 +102,12 @@ class InferencePipe:
         if not (odma.read(0x00) & 0x4):
             raise RuntimeError("ODMA not idle")
 
+        stage = self._mark("idle_checks", stage)
         fpga_start = time.perf_counter()
 
         self.accel.execute_on_buffers(asynch=True, batch_size=1)
 
+        stage = self._mark("launch", stage)
         while True:
             status = odma.read(0x00)
 
@@ -111,11 +120,13 @@ class InferencePipe:
 
             time.sleep(0.0001)
 
+        stage = self._mark("wait", stage)
         fpga_ms = (fpga_end - fpga_start) * 1000.0
 
         self._frame_fpga_ms += fpga_ms
         self._frame_classifier_calls += 1
 
+        stage = time.perf_counter()
         self.accel.copy_output_data_from_device(self.accel.obuf_packed[0], ind=0)
 
         packed_output = np.asarray(self.accel.obuf_packed[0])
@@ -130,14 +141,21 @@ class InferencePipe:
 
         y = self.accel.unfold_output(obuf_folded, ind=0).copy()
 
+        stage = self._mark("unfold", stage)
         scores = y[0]
 
         class_id = int(np.argmax(scores))
+        self._mark("crop_argmax", stage)
 
         return {
             "class_id": class_id,
             "scores": scores.copy()
         }
+
+    def _mark(self, name, start):
+        now = time.perf_counter()
+        self._timings[name] = self._timings.get(name, 0.0) + (now - start) * 1000.0
+        return now
 
     def process_frame(self, x):
         """Classify fixed crops and sum scores from crops whose label is not 0."""
@@ -145,6 +163,7 @@ class InferencePipe:
         self._frame_fpga_ms = 0.0
         self._frame_classifier_calls = 0
 
+        self._timings = {}
         t0 = time.perf_counter()
         
         expected = (1, 3, self.config.camera_height, self.config.camera_width)
@@ -163,11 +182,14 @@ class InferencePipe:
     
             for px, py in self.config.crop_positions:
 
+                stage = time.perf_counter()
                 left = max(0, min(width - size, round(px * width - size / 2)))
                 top = max(0, min(height - size, round(py * height - size / 2)))
                 crop = image[top:top + size, left:left + size]
 
+                stage = self._mark("crop", stage)
                 crop64 = cv2.resize(crop, (self.config.input_size, self.config.input_size), interpolation=cv2.INTER_AREA)
+                self._mark("resize", stage)
                 detection = self.label_func(crop64)
                 crop_labels.append(detection["class_id"])
 
@@ -177,6 +199,7 @@ class InferencePipe:
                 detection["bbox"] = (left + size / 2, top + size / 2, size)
                 detections.append(detection)
 
+        stage = time.perf_counter()
         frame_detection = None
 
         if detections:
@@ -192,7 +215,13 @@ class InferencePipe:
                     "raw_count": len(detections)
                 }
 
+        self._mark("consensus", stage)
         detect_ms = (time.perf_counter() - t0) * 1000.0
+        self._timings["other"] = max(0.0, detect_ms - sum(self._timings.values()))
+        self._profile_frames += 1
+        if self._profile_frames % 10 == 0:
+            stages = " | ".join(f"{k}={v:.2f}" for k, v in self._timings.items())
+            print(f"[profile] total={detect_ms:.2f} ms | calls={self._frame_classifier_calls} | stage totals in ms: {stages}", flush=True)
 
         return {
             "detections": detections,
@@ -202,4 +231,5 @@ class InferencePipe:
             "fpga_ms": self._frame_fpga_ms,
             "classifier_calls": self._frame_classifier_calls,
             "detect_ms": detect_ms,
+            "timing_ms": self._timings.copy(),
         }
