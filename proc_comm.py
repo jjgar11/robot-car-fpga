@@ -78,7 +78,7 @@ def comm_process(inf_to_com_q, shutdown_event, ready_event, config):
                 else:
                     print("[comm]   no stable traffic signs", flush=True)
 
-                log.write(json.dumps(payload, separators=(",", ":")) + "\\n")
+                log.write(json.dumps(payload, separators=(",", ":")) + "\n")
                 log.flush()
 
                 if server.has_client:

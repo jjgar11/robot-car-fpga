@@ -2,6 +2,7 @@ import sys
 import time
 import numpy as np
 import cv2
+from concurrent.futures import ThreadPoolExecutor
 
 from labels import LABELS_EN
 
@@ -19,7 +20,9 @@ class InferencePipe:
         self.clear_pynq_state = clear_pynq_state
         self.accel = None
         self._output_verified = False
+        self._input_verified = False
         self._profile_frames = 0
+        self._pool = ThreadPoolExecutor(4)  # cv2.resize releases the GIL
 
         self._load_overlay()
 
@@ -47,22 +50,12 @@ class InferencePipe:
         print(f"[inference] runtime_batch={self.BATCH_SIZE}", flush=True)
 
     @staticmethod
-    def pack_input_int4_fast(x_folded):
-        x = np.asarray(x_folded)
+    def quantize_pack_int4(crops):
+        """(N,64,64,3) float crops -> floor(x*8+0.5) clamped to INT4, packed as N FINN (1,64,64,1,2) buffers."""
+        x = np.clip(np.floor(crops * 8.0 + 0.5), -8, 7)
+        u = (x.astype(np.int8).view(np.uint8) & 0xF)[:, None, :, :, None, :]
 
-        if x.shape[-1] != 3:
-            raise ValueError(f"Unexpected folded shape: {x.shape}")
-
-        if (np.any(x < -8) or np.any(x > 7)):
-            raise ValueError(
-                f"INT4 out of range: "
-                f"min={x.min()}, "
-                f"max={x.max()}"
-            )
-
-        u = (x.astype(np.int16) & 0xF).astype(np.uint8)
-
-        out = np.empty(x.shape[:-1] + (2,), dtype=np.uint8)
+        out = np.empty(u.shape[:-1] + (2,), dtype=np.uint8)
 
         out[..., 0] = (u[..., 0] | (u[..., 1] << 4))
 
@@ -70,23 +63,10 @@ class InferencePipe:
 
         return out
 
-    def label_func(self, frame64):
-        """Classify one detector crop and preserve all 44 FINN scores."""
+    def label_func(self, packed):
+        """Classify one packed INT4 crop and preserve all 44 FINN scores."""
 
         stage = time.perf_counter()
-        # RGB HWC -> normalized BHWC
-        x_float = frame64.astype(np.float32)[None, ...]
-
-        # Quantize INT4
-        x_batch = np.clip(np.floor(x_float * 8.0 + 0.5), -8, 7).astype(np.float32)
-
-        stage = self._mark("quantize", stage)
-        folded = self.accel.fold_input(x_batch, ind=0)
-
-        stage = self._mark("fold", stage)
-        packed = (self.pack_input_int4_fast(folded))
-
-        stage = self._mark("pack", stage)
         np.copyto(self.accel.ibuf_packed_device[0], packed)
 
         stage = self._mark("input_copy", stage)
@@ -129,6 +109,7 @@ class InferencePipe:
         stage = time.perf_counter()
         self.accel.copy_output_data_from_device(self.accel.obuf_packed[0], ind=0)
 
+        stage = self._mark("output_copy", stage)
         packed_output = np.asarray(self.accel.obuf_packed[0])
         if packed_output.dtype != np.uint8 or packed_output.shape != (1, 44, 2):
             raise ValueError(f"Unexpected packed output: {packed_output.shape}, {packed_output.dtype}")
@@ -139,6 +120,7 @@ class InferencePipe:
             self._output_verified = True
             print("[inference] Fast INT16 output verified against FINN driver", flush=True)
 
+        stage = self._mark("unpack", stage)
         y = self.accel.unfold_output(obuf_folded, ind=0).copy()
 
         stage = self._mark("unfold", stage)
@@ -174,30 +156,42 @@ class InferencePipe:
             )
 
         height, width = x.shape[-2:]
-        image = np.transpose(x[0], (1, 2, 0))
-        detections, crop_labels = [], []
+        stage = time.perf_counter()
+        image = np.ascontiguousarray(np.transpose(x[0], (1, 2, 0)))
+        self._mark("layout", stage)
+        detections, crop_labels, boxes = [], [], []
 
+        stage = time.perf_counter()
         for fraction in self.config.crop_sizes:
             size = max(1, min(min(height, width), round(min(height, width) * fraction)))
     
             for px, py in self.config.crop_positions:
-
-                stage = time.perf_counter()
                 left = max(0, min(width - size, round(px * width - size / 2)))
                 top = max(0, min(height - size, round(py * height - size / 2)))
-                crop = image[top:top + size, left:left + size]
+                boxes.append((left, top, size))
 
-                stage = self._mark("crop", stage)
-                crop64 = cv2.resize(crop, (self.config.input_size, self.config.input_size), interpolation=cv2.INTER_AREA)
-                self._mark("resize", stage)
-                detection = self.label_func(crop64)
-                crop_labels.append(detection["class_id"])
+        stage = self._mark("crop", stage)
+        resize = lambda b: cv2.resize(image[b[1]:b[1] + b[2], b[0]:b[0] + b[2]], (self.config.input_size, self.config.input_size), interpolation=cv2.INTER_AREA)
+        crops = np.stack(list(self._pool.map(resize, boxes)))
+        stage = self._mark("resize", stage)
+        packed = self.quantize_pack_int4(crops)
+        if not self._input_verified:
+            for crop, buf in zip(crops[:1], packed):  # FINN pack_input takes ~3 s per crop
+                q = np.clip(np.floor(crop.astype(np.float32)[None, ...] * 8.0 + 0.5), -8, 7).astype(np.float32)
+                if not np.array_equal(buf, self.accel.pack_input(self.accel.fold_input(q, ind=0), ind=0)): raise RuntimeError("Fast INT4 input differs from FINN driver")
+            self._input_verified = True
+            print("[inference] Fast INT4 input verified against FINN driver", flush=True)
+        self._mark("quantize_pack", stage)
 
-                if detection["class_id"] == 0: 
-                    continue
+        for (left, top, size), buf in zip(boxes, packed):
+            detection = self.label_func(buf)
+            crop_labels.append(detection["class_id"])
 
-                detection["bbox"] = (left + size / 2, top + size / 2, size)
-                detections.append(detection)
+            if detection["class_id"] == 0: 
+                continue
+
+            detection["bbox"] = (left + size / 2, top + size / 2, size)
+            detections.append(detection)
 
         stage = time.perf_counter()
         frame_detection = None

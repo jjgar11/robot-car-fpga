@@ -13,7 +13,7 @@ import time
 from config import DemoConfig, DetectionEvent
 from proc_inference import inference_process
 from proc_movement import movement_process
-from proc_camera import camera_process
+from proc_camera import camera_process, SharedFrame
 from proc_comm import comm_process
 
 # Timeout constants (seconds)
@@ -127,7 +127,7 @@ def main():
         validate_files(config)
 
     # IPC primitives
-    cam_to_inf_q = multiprocessing.Queue(maxsize=1)
+    cam_to_inf_q = SharedFrame(config.camera_height, config.camera_width)
     inf_to_mov_q = multiprocessing.Queue(maxsize=1)
     inf_to_com_q = multiprocessing.Queue(maxsize=1)
     startup_q    = multiprocessing.Queue()  # movement → supervisor startup info
