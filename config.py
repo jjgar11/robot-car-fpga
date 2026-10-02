@@ -62,9 +62,7 @@ class DetectionEvent:
     frame_id: int
     ready: bool
     detect_ms: float
-    filter_ms: float
     fpga_total_ms: float
-    fpga_avg_ms: float
     classifier_calls: int
     queue_delay_ms: float
     end_to_end_ms: float
@@ -78,10 +76,6 @@ class DetectionEvent:
     @property
     def stable_detection_count(self):
         return len(self.detections)
-
-    @property
-    def non_fpga_ms(self):
-        return max(0.0, self.detect_ms - self.fpga_total_ms)
 
     def to_dict(self, include_scores=False):
         detections = []
@@ -111,10 +105,7 @@ class DetectionEvent:
             "timing": {
                 "queue_delay_ms": self.queue_delay_ms,
                 "detect_ms": self.detect_ms,
-                "filter_ms": self.filter_ms,
                 "fpga_total_ms": self.fpga_total_ms,
-                "fpga_avg_ms": self.fpga_avg_ms,
-                "non_fpga_ms": self.non_fpga_ms,
                 "end_to_end_ms": self.end_to_end_ms
             },
         }

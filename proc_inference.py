@@ -55,15 +55,9 @@ def inference_process(cam_to_inf_q, inf_to_mov_q, inf_to_com_q, shutdown_event, 
 
             result = pipe.process_frame(frame)
 
-            filter_start = time.perf_counter()
             stable_detections = temporal.update(result["detections"])
-            filter_ms = (time.perf_counter() - filter_start) * 1000.0
 
             event_time = time.monotonic()
-
-            classifier_calls = result["classifier_calls"]
-            fpga_total_ms = result["fpga_ms"]
-            fpga_avg_ms = (fpga_total_ms / classifier_calls if classifier_calls else 0.0)
 
             event = detection_event(
                 detections=stable_detections,
@@ -71,11 +65,9 @@ def inference_process(cam_to_inf_q, inf_to_mov_q, inf_to_com_q, shutdown_event, 
                 frame_timestamp=frame_timestamp,
                 frame_id=frame_id,
                 ready=bool(stable_detections),
-                detect_ms=result["detect_ms"],
-                filter_ms=filter_ms,
-                fpga_total_ms=fpga_total_ms,
-                fpga_avg_ms=fpga_avg_ms,
-                classifier_calls=classifier_calls,
+                detect_ms=(event_time - inference_start) * 1000.0,  # frame processing incl. locator and temporal filter
+                fpga_total_ms=result["fpga_ms"],
+                classifier_calls=result["classifier_calls"],
                 queue_delay_ms=queue_delay_ms,
                 end_to_end_ms=(event_time - frame_timestamp) * 1000.0,
                 raw_detection_count=len(result["detections"]),

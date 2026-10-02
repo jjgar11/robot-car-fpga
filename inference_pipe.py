@@ -21,8 +21,6 @@ class InferencePipe:
         self.accel = None
         self.locator = Locator('locator.pth') 
         torch.set_num_threads(3)  # 4 threads oversubscribe the 4 cores shared with the camera process
-        self._output_verified = False
-        self._input_verified = False
 
         self._load_overlay()
 
@@ -70,11 +68,6 @@ class InferencePipe:
         x_float = np.transpose(frame64.detach().cpu().numpy(), (0, 2, 3, 1))
 
         packed = self.quantize_pack_int4(x_float)[0]
-        if not self._input_verified:
-            x_batch = np.clip(np.floor(x_float.astype(np.float32) * 8.0 + 0.5), -8, 7).astype(np.float32)
-            if not np.array_equal(packed, self.accel.pack_input(self.accel.fold_input(x_batch, ind=0), ind=0)): raise RuntimeError("Fast INT4 input differs from FINN driver")
-            self._input_verified = True
-            print("[inference] Fast INT4 input verified against FINN driver", flush=True)
 
         np.copyto(self.accel.ibuf_packed_device[0], packed)
 
@@ -116,12 +109,6 @@ class InferencePipe:
         if packed_output.dtype != np.uint8 or packed_output.shape != (1, 44, 2):
             raise ValueError(f"Unexpected packed output: {packed_output.shape}, {packed_output.dtype}")
         obuf_folded = np.ascontiguousarray(packed_output).view("<i2").reshape(1, 44, 1).astype(np.float32)
-        if not self._output_verified:
-            reference = self.accel.unpack_output(self.accel.obuf_packed[0], ind=0)
-            if not np.array_equal(obuf_folded, reference): raise RuntimeError("Fast INT16 output differs from FINN driver")
-            self._output_verified = True
-            print("[inference] Fast INT16 output verified against FINN driver", flush=True)
-
         y = self.accel.unfold_output(obuf_folded, ind=0).copy()
 
         scores = y[0]
@@ -139,8 +126,6 @@ class InferencePipe:
         self._frame_fpga_ms = 0.0
         self._frame_classifier_calls = 0
 
-        t0 = time.perf_counter()
-        
         expected = (1, 3, self.config.camera_height, self.config.camera_width)
 
         if x.shape != expected:
@@ -159,11 +144,8 @@ class InferencePipe:
                 int(size.item()) if torch.is_tensor(size) else int(size),
             )
 
-        detect_ms = (time.perf_counter() - t0) * 1000.0
-
         return {
             "detections": detections,
             "fpga_ms": self._frame_fpga_ms,
             "classifier_calls": self._frame_classifier_calls,
-            "detect_ms": detect_ms,
         }

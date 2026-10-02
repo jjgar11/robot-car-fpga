@@ -6,6 +6,7 @@ laptop over TCP without blocking inference or movement.
 from __future__ import annotations
 import json
 import signal
+import time
 from queue import Empty
 
 
@@ -19,6 +20,7 @@ def comm_process(inf_to_com_q, shutdown_event, ready_event, config):
 
         with open(config.log_path, 'a', buffering=1) as log:
             ready_event.set()
+            last_label, last_print = None, 0.0
 
             while not shutdown_event.is_set():
                 event = None
@@ -35,51 +37,16 @@ def comm_process(inf_to_com_q, shutdown_event, ready_event, config):
                     continue
 
                 payload = event.to_dict(include_scores=False)
-                status = "STABLE" if event.ready else "SEARCHING"
 
-                print(
-                    f"[comm] frame={event.frame_id:06d} | "
-                    f"{status} | "
-                    f"raw={event.raw_detection_count} "
-                    f"grouped={event.grouped_detection_count} "
-                    f"stable={event.stable_detection_count} | "
-                    f"classifier_calls={event.classifier_calls}",
-                    flush=True,
-                )
+                # One compact line per second, plus immediately when the stable sign changes
+                label = event.primary_detection["label"] if event.detections else None
+                now = time.monotonic()
+                if label != last_label or now - last_print >= 1.0:
+                    sign = f"{label} (id={event.primary_detection['class_id']})" if label else "SEARCHING"
+                    print(f"[comm] frame={event.frame_id:06d} | {sign} | total={event.detect_ms:.1f} ms | fpga={event.fpga_total_ms:.1f} ms", flush=True)
+                    last_label, last_print = label, now
 
-                print(
-                    f"[comm] timing | "
-                    f"queue={event.queue_delay_ms:.1f} ms | "
-                    f"detect={event.detect_ms:.1f} ms | "
-                    f"filter={event.filter_ms:.2f} ms | "
-                    f"FPGA_total={event.fpga_total_ms:.1f} ms | "
-                    f"FPGA_avg={event.fpga_avg_ms:.2f} ms | "
-                    f"non_FPGA={event.non_fpga_ms:.1f} ms | "
-                    f"end_to_end={event.end_to_end_ms:.1f} ms",
-                    flush=True,
-                )
-
-                if event.detections:
-                    for index, detection in enumerate(event.detections, start=1):
-                        cx, cy, size = detection["bbox"]
-                        primary = " PRIMARY" if index == 1 else ""
-
-                        print(
-                            f"[comm]   #{index}{primary} | "
-                            f"{detection['label']} | "
-                            f"id={detection['class_id']} | "
-                            f"track={detection['track_id']} | "
-                            f"bbox_center=({cx},{cy}) size={size} | "
-                            f"hits={detection['hits']}/{detection['window_size']} | "
-                            f"score_sum={detection['score_sum']:.1f} | "
-                            f"score_mean={detection['score_mean']:.1f} | "
-                            f"raw_boxes={detection['raw_count']}",
-                            flush=True,
-                        )
-                else:
-                    print("[comm]   no stable traffic signs", flush=True)
-
-                log.write(json.dumps(payload, separators=(",", ":")) + "\\n")
+                log.write(json.dumps(payload, separators=(",", ":")) + "\n")
                 log.flush()
 
                 if server.has_client:
