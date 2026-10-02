@@ -13,7 +13,7 @@ from queue import Empty, Full
 def preprocess(frame_bgr):
     frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
     frame_rgb = np.transpose(frame_rgb, (2, 0, 1))
-    frame = np.asarray(frame_rgb)[np.newaxis, ...]
+    frame = np.asarray(frame_rgb, dtype=np.float32)[np.newaxis, ...] / 255.0
     return frame
 
 def camera_process(cam_to_inf_q, shutdown_event, ready_event, config):

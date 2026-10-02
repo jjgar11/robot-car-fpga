@@ -74,7 +74,7 @@ class InferencePipe:
         """Classify one detector crop and preserve all 44 FINN scores."""
 
         # Torch BCHW -> NumPy BCHW
-        x_float = (frame64.detach().cpu().numpy().astype(np.float32) / 255.0)
+        x_float = frame64.detach().cpu().numpy().astype(np.float32)
 
         # BCHW -> BHWC
         x_float = np.transpose(x_float, (0, 2, 3, 1))
